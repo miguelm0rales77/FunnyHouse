@@ -2,7 +2,7 @@
    Guarda la app en el móvil para que abra al instante y funcione sin cobertura.
    Los datos NUNCA se cachean aquí: eso lo gestiona la propia app. */
 
-const VERSION = "funnyhouse-v5";
+const VERSION = "funnyhouse-v6";
 const SHELL = [
   "./",
   "./index.html",
@@ -19,7 +19,7 @@ const FONT_CACHE = VERSION + "-fonts";
 self.addEventListener("install", (e) => {
   e.waitUntil(
     caches.open(VERSION)
-      .then((c) => Promise.allSettled(SHELL.map((u) => c.add(u))))
+      .then((c) => Promise.allSettled(SHELL.map((u) => c.add(new Request(u, { cache: "reload" })))))
       .then(() => self.skipWaiting())
   );
 });

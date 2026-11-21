@@ -16,6 +16,7 @@ const HOME = String(CFG.home || "casa").trim();
 const FORCE_LOCAL = /[?&]local=1\b/.test(location.search);   // ?local=1 → probar sin tocar los datos reales
 const REMOTE = !CFG.localOnly && !FORCE_LOCAL && /^https:\/\/.+\.supabase\.(co|in)$/i.test(BASE) && KEY.length > 30;
 const DESPENSAR = String(CFG.despensarUrl || "").trim();
+const APP_VERSION = "6";       // súbelo junto con VERSION de sw.js en cada cambio
 
 /* ---------------------------------------------------------------
    1. Constantes
@@ -897,7 +898,7 @@ function renderFamilia(){
 
   if (isAdmin()) html += '<p class="by" style="margin:10px 2px 0">Los <b>admin</b> aprueban tareas, reparten puntos, crean premios y gestionan la familia. Los <b>miembros</b> marcan sus tareas, apuntan sus deberes y piden premios.</p>';
 
-  html += secHTML("Este dispositivo", "");
+  html += secHTML("Este dispositivo", "versión " + APP_VERSION);
   html += '<div class="list"><button class="linkrow" type="button" data-act="who">' + av(me(), "sm") +
     '<span class="grow">' + (me() ? "Estás como " + esc(me().name) + " · Cambiar" : "Elegir quién eres") + '</span><span class="chev">' + ICONS.chev + "</span></button>";
   if (DESPENSAR) html += '<a class="linkrow" href="' + esc(DESPENSAR) + '"><span class="av sm" style="--c:#2E6FCB">🥫</span><span class="grow">Abrir Despensar</span><span class="chev">' + ICONS.chev + "</span></a>";
@@ -1648,6 +1649,18 @@ function start(){
 start();
 
 if ("serviceWorker" in navigator && location.protocol === "https:") {
-  window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(() => {}); });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js", { updateViaCache: "none" })
+      .then((reg) => { reg.update().catch(() => {}); })
+      .catch(() => {});
+  });
+  // Cuando se activa una versión nueva, recargar una vez para usarla ya
+  // (salvo que haya una ventana abierta, para no perder lo que se está escribiendo).
+  let reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloading) return;
+    if (sheet.open) { toast("Hay una versión nueva: se usará al cerrar la app"); return; }
+    reloading = true; location.reload();
+  });
 }
 })();
