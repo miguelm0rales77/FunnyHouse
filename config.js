@@ -9,10 +9,12 @@
 window.FUNNYHOUSE_CONFIG = {
 
   /* La dirección de tu proyecto de Supabase. */
-  supabaseUrl: "https://kikkqgocuvrkbhklrrkt.supabase.co",
+  supabaseUrl: "https://hokdzwfprpsaxfuhnlhi.supabase.co",
 
-  /* La clave pública (anon). Está pensada para ir dentro de la página. */
-  supabaseKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imtpa2txZ29jdXZya2Joa2xycmt0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1ODc1NzcsImV4cCI6MjEwMzE2MzU3N30.N7cdvjE7Z_mLwZHqR0xNi0aoMDHZLPMvbMM9Q6WYokY",
+  /* La clave pública del MISMO proyecto (Project Settings → API Keys):
+     la «anon public» (empieza por eyJ…) o la «publishable» (sb_publishable_…).
+     Está pensada para ir dentro de la página. NUNCA pongas aquí la secret / service_role. */
+  supabaseKey: "sb_publishable_ZTzjc7w-zmtf9GNkC453dA_1LTAMXx2",
 
   /* El identificador de vuestra casa. Separa vuestros datos de los de
      cualquier otra familia que use la misma base de datos.

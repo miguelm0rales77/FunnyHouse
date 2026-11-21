@@ -144,7 +144,10 @@ function api(path, opts){
   return fetch(BASE + "/rest/v1" + path, {
     method: opts.method || "GET",
     cache: "no-store",
-    headers: Object.assign({ apikey: KEY, Authorization: "Bearer " + KEY, "Content-Type": "application/json" }, opts.headers || {}),
+    // Clave antigua (anon, empieza por eyJ…) va también como Bearer; la nueva
+    // (sb_publishable_…) no es un JWT y solo debe ir en «apikey».
+    headers: Object.assign({ apikey: KEY, "Content-Type": "application/json" },
+      /^eyJ/.test(KEY) ? { Authorization: "Bearer " + KEY } : {}, opts.headers || {}),
     body: opts.body
   });
 }
@@ -177,6 +180,7 @@ async function runJob(job){
     const body = await res.text().catch(() => "");
     const err = new Error("HTTP " + res.status + " " + body.slice(0,200));
     err.status = res.status;
+    err.detail = job.table + " → " + errMsg(res.status, body);
     throw err;
   }
 }
@@ -193,11 +197,14 @@ async function flush(){
         await runJob(job);
         outbox.shift(); saveOutbox();
       } catch (err) {
+        // 404 = Supabase no encuentra la tabla: NO se descarta el cambio,
+        // se queda en la cola y se reintenta hasta que la tabla exista.
+        if (err.status === 404) { bannerDetail = err.detail; showBanner("tables"); paintBanner(); throw err; }
         job.tries = (job.tries || 0) + 1;
         saveOutbox();
         if (job.tries >= 4 || (err.status >= 400 && err.status < 500 && err.status !== 429)) {
           outbox.shift(); saveOutbox();
-          showBanner(err.status === 404 ? "tables" : "rejected");
+          bannerDetail = err.detail || ""; showBanner("rejected"); paintBanner();
           continue;
         }
         throw err;
@@ -220,9 +227,13 @@ async function refresh(){
     const h = "?home=eq." + encodeURIComponent(HOME) + "&select=*";
     const res = await Promise.all(KINDS.map((k) =>
       api("/" + TABLES[k] + h + (k === "done" || k === "points" ? "&order=created_at.desc&limit=5000" : ""))));
-    const bad = res.find((r) => !r.ok);
+    const badI = res.findIndex((r) => !r.ok);
+    const bad = res[badI];
     if (bad) {
-      if (bad.status === 404) { showBanner("tables"); loaded = true; afterLoad(); }
+      if (bad.status === 404) {
+        bannerDetail = TABLES[KINDS[badI]] + " → " + errMsg(404, await bad.text().catch(() => ""));
+        showBanner("tables"); paintBanner(); loaded = true; afterLoad();
+      }
       throw new Error("fetch " + bad.status);
     }
     const json = await Promise.all(res.map((r) => r.json()));
@@ -317,14 +328,21 @@ function drop(kind, id, quiet){
 const banners = {
   offline:'<strong>Sin conexión.</strong> Puedes seguir marcando tareas: se guardará solo en cuanto vuelvas a tener red.',
   rejected:'<strong>Un cambio no se pudo guardar.</strong> Si se repite, revisa que las tablas de Supabase estén creadas.',
-  tables:'<strong>Faltan las tablas de FunnyHouse en Supabase.</strong> Ejecuta el archivo <code>schema.sql</code> en el SQL Editor de Supabase y recarga.',
+  tables:'<strong>Supabase no encuentra una tabla de FunnyHouse.</strong> Revisa que <code>schema.sql</code> se ejecutó en este mismo proyecto. Tus cambios no se pierden: se guardarán solos cuando la tabla exista.',
   local:'<strong>Modo local.</strong> Los datos se guardan solo en este navegador. Pon <code>localOnly: false</code> en config.js para compartirlos con la familia.'
 };
 let activeBanner = null;
+let bannerDetail = "";
+function errMsg(status, body){
+  try { const j = JSON.parse(body); return (j.code ? j.code + ": " : "") + (j.message || j.error || body); }
+  catch (e) { return "HTTP " + status + (body ? " " + body.slice(0, 160) : ""); }
+}
 function showBanner(k){ if (activeBanner === k) return; activeBanner = k; paintBanner(); }
 function hideBanner(k){ if (activeBanner === k) { activeBanner = null; paintBanner(); } }
 function paintBanner(){
-  document.getElementById("bannerSlot").innerHTML = activeBanner ? '<div class="banner">' + banners[activeBanner] + "</div>" : "";
+  const extra = (activeBanner === "tables" || activeBanner === "rejected") && bannerDetail
+    ? '<div class="banner-detail mono">' + esc(bannerDetail) + "<br>Proyecto: " + esc(BASE.replace(/^https:\/\//, "")) + "</div>" : "";
+  document.getElementById("bannerSlot").innerHTML = activeBanner ? '<div class="banner">' + banners[activeBanner] + extra + "</div>" : "";
 }
 
 /* ---------------------------------------------------------------
