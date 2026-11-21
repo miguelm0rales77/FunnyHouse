@@ -21,6 +21,24 @@ create extension if not exists pgcrypto with schema extensions;
 -- Por si schema.sql es de una versión anterior: columna de las tareas de «todos».
 alter table fh_tasks add column if not exists team text;
 
+-- Tareas favoritas (plantillas). Igual que en schema.sql, por si no lo has vuelto a ejecutar.
+create table if not exists fh_favs (
+  id          text primary key,
+  home        text not null,
+  title       text not null,
+  kind        text not null default 'casa',
+  study_type  text,
+  subject     text,
+  points      integer not null default 0,
+  freq        text not null default 'none',
+  needs_ok    boolean not null default true,
+  notes       text,
+  created_by  text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create index if not exists fh_favs_home on fh_favs (home);
+
 -- Sesiones de cada móvil y control de intentos de PIN.
 create table if not exists fh_sessions (
   token       text primary key,
@@ -42,7 +60,7 @@ do $$
 declare t text;
 begin
   foreach t in array array['fh_members','fh_tasks','fh_done','fh_rewards','fh_claims',
-                           'fh_points','fh_photos','fh_sessions','fh_pin_fails'] loop
+                           'fh_points','fh_photos','fh_favs','fh_sessions','fh_pin_fails'] loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists "fh anon" on %I', t);
     execute format('revoke all on %I from anon, authenticated', t);
@@ -186,7 +204,8 @@ begin
     'claims',  (select coalesce(json_agg(x), '[]'::json) from fh_claims x where home = h),
     'points',  (select coalesce(json_agg(x), '[]'::json) from
                   (select * from fh_points where home = h order by created_at desc limit 5000) x),
-    'photos',  (select coalesce(json_object_agg(id, updated_at), '{}'::json) from fh_photos where home = h)
+    'photos',  (select coalesce(json_object_agg(id, updated_at), '{}'::json) from fh_photos where home = h),
+    'favs',    (select coalesce(json_agg(x), '[]'::json) from fh_favs x where home = h)
   );
 end $$;
 
@@ -214,6 +233,7 @@ declare
   ed fh_done;    vd fh_done;
   vp fh_points;
   vr fh_rewards; rw fh_rewards;
+  vf fh_favs;
   ec fh_claims;  vc fh_claims;
   ph text; v_expected text; v_mine boolean;
 begin
@@ -441,6 +461,26 @@ begin
         insert into fh_photos (id, home, photo, updated_at) values (k, h, ph, now())
           on conflict (id) do update set photo = excluded.photo, updated_at = excluded.updated_at
           where fh_photos.home = h;
+      end if;
+
+    -- ===== tareas favoritas (solo admin) =====
+    elsif tb = 'fh_favs' then
+      if not adm then perform fh__deny(i, 'Solo un admin puede cambiar los favoritos'); end if;
+      if v_kind = 'delete' then
+        delete from fh_favs where id = k and home = h;
+      else
+        vf := jsonb_populate_record(null::fh_favs, r);
+        if vf.title is null or length(btrim(vf.title)) not between 1 and 120 then perform fh__deny(i, 'Título no válido'); end if;
+        if coalesce(vf.kind, '') not in ('casa', 'estudio') then perform fh__deny(i, 'Tipo no válido'); end if;
+        if coalesce(vf.freq, '') not in ('none', 'daily', 'weekdays', 'weekly') then perform fh__deny(i, 'Frecuencia no válida'); end if;
+        if length(coalesce(vf.notes, '')) > 600 then perform fh__deny(i, 'Notas demasiado largas'); end if;
+        vf.home := h; vf.updated_at := now(); vf.created_at := coalesce(vf.created_at, now());
+        vf.points := greatest(0, coalesce(vf.points, 0)); vf.needs_ok := coalesce(vf.needs_ok, true);
+        insert into fh_favs select (vf).*
+          on conflict (id) do update set (title, kind, study_type, subject, points, freq, needs_ok, notes, updated_at)
+          = (excluded.title, excluded.kind, excluded.study_type, excluded.subject, excluded.points, excluded.freq,
+             excluded.needs_ok, excluded.notes, excluded.updated_at)
+          where fh_favs.home = h;
       end if;
 
     else

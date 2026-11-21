@@ -115,6 +115,24 @@ create table if not exists fh_photos (
 );
 create index if not exists fh_photos_home on fh_photos (home);
 
+-- Tareas favoritas: plantillas para crear una tarea con un toque (sin persona).
+create table if not exists fh_favs (
+  id          text primary key,
+  home        text not null,
+  title       text not null,
+  kind        text not null default 'casa',
+  study_type  text,
+  subject     text,
+  points      integer not null default 0,
+  freq        text not null default 'none',
+  needs_ok    boolean not null default true,
+  notes       text,
+  created_by  text,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create index if not exists fh_favs_home on fh_favs (home);
+
 create index if not exists fh_members_home on fh_members (home);
 create index if not exists fh_tasks_home   on fh_tasks   (home);
 create index if not exists fh_done_home    on fh_done    (home, created_at desc);
@@ -127,7 +145,7 @@ create index if not exists fh_points_home  on fh_points  (home);
 do $$
 declare t text;
 begin
-  foreach t in array array['fh_members','fh_tasks','fh_done','fh_rewards','fh_claims','fh_points','fh_photos'] loop
+  foreach t in array array['fh_members','fh_tasks','fh_done','fh_rewards','fh_claims','fh_points','fh_photos','fh_favs'] loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists "fh anon" on %I', t);
     execute format('revoke all on %I from anon, authenticated', t);

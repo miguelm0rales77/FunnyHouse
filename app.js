@@ -16,12 +16,12 @@ const HOME = String(CFG.home || "casa").trim();
 const FORCE_LOCAL = /[?&]local=1\b/.test(location.search);   // ?local=1 → probar sin tocar los datos reales
 const REMOTE = !CFG.localOnly && !FORCE_LOCAL && /^https:\/\/.+\.supabase\.(co|in)$/i.test(BASE) && KEY.length > 30;
 const DESPENSAR = String(CFG.despensarUrl || "").trim();
-const APP_VERSION = "6";       // súbelo junto con VERSION de sw.js en cada cambio
+const APP_VERSION = "7";       // súbelo junto con VERSION de sw.js en cada cambio
 
 /* ---------------------------------------------------------------
    1. Constantes
    --------------------------------------------------------------- */
-const TABLES = { members:"fh_members", tasks:"fh_tasks", done:"fh_done", rewards:"fh_rewards", claims:"fh_claims", points:"fh_points" };
+const TABLES = { members:"fh_members", tasks:"fh_tasks", done:"fh_done", rewards:"fh_rewards", claims:"fh_claims", points:"fh_points", favs:"fh_favs" };
 const KINDS = Object.keys(TABLES);
 
 const TABS = [
@@ -57,7 +57,7 @@ const ICONS = {
 /* ---------------------------------------------------------------
    2. Estado local
    --------------------------------------------------------------- */
-const EMPTY = () => ({ members:[], tasks:[], done:[], rewards:[], claims:[], points:[] });
+const EMPTY = () => ({ members:[], tasks:[], done:[], rewards:[], claims:[], points:[], favs:[] });
 let state = EMPTY();
 let outbox = [];
 let tab = "hoy";
@@ -898,6 +898,14 @@ function renderFamilia(){
 
   if (isAdmin()) html += '<p class="by" style="margin:10px 2px 0">Los <b>admin</b> aprueban tareas, reparten puntos, crean premios y gestionan la familia. Los <b>miembros</b> marcan sus tareas, apuntan sus deberes y piden premios.</p>';
 
+  if (isAdmin()) {
+    const fs = sortedFavs();
+    html += secHTML("⭐ Tareas favoritas", fs.length || "");
+    html += fs.length ? '<div class="list">' + fs.map((f) => '<button class="linkrow" type="button" data-act="fav" data-id="' + esc(f.id) + '">' +
+        '<span class="av sm" style="--c:#E0A526">⭐</span><span class="grow">' + esc(favLabel(f)) + '<span class="by" style="display:block">' + esc(favSummary(f)) + "</span></span>" +
+        '<span class="chev">' + ICONS.chev + "</span></button>").join("") + "</div>"
+      : '<p class="by" style="margin:4px 2px 0">Al crear o editar una tarea, activa «Guardar como favorito» y saldrá arriba en «Nueva tarea» para crearla con un toque.</p>';
+  }
   html += secHTML("Este dispositivo", "versión " + APP_VERSION);
   html += '<div class="list"><button class="linkrow" type="button" data-act="who">' + av(me(), "sm") +
     '<span class="grow">' + (me() ? "Estás como " + esc(me().name) + " · Cambiar" : "Elegir quién eres") + '</span><span class="chev">' + ICONS.chev + "</span></button>";
@@ -938,6 +946,7 @@ view.addEventListener("click", (e) => {
     }
     case "reward": { const r = state.rewards.find((x) => x.id === id); if (r) openReward(r); break; }
     case "member": { const m = member(id); if (m) openMember(m); break; }
+    case "fav": { const f = state.favs.find((x) => x.id === id); if (f) openFav(f); break; }
     case "who": openWho(); break;
     case "retry": retryNow(); break;
   }
@@ -1013,6 +1022,29 @@ function stepper(minusSel, plusSel, inputSel, step, allowNeg){
   $(minusSel).addEventListener("click", () => { const v = (Number(inp.value) || 0) - step; inp.value = allowNeg ? v : Math.max(0, v); });
   $(plusSel).addEventListener("click", () => { inp.value = (Number(inp.value) || 0) + step; });
   return inp;
+}
+function sortedFavs(){
+  return (state.favs || []).slice().sort((a, b) => (a.title || "").localeCompare(b.title || "", "es"));
+}
+function favLabel(f){ return (f.kind === "estudio" ? "📚 " : "") + f.title; }
+function favSummary(f){
+  const bits = [f.kind === "estudio" ? (STUDY[f.study_type] || "Estudios") + (f.subject ? " · " + f.subject : "") : "Casa", FREQ[f.freq || "none"]];
+  if (Number(f.points)) bits.push("+" + Number(f.points) + " ⭐");
+  if (f.needs_ok === false) bits.push("sin revisión");
+  return bits.join(" · ");
+}
+function openFav(f){
+  openSheet(
+    "<h2>⭐ " + esc(f.title) + "</h2>" +
+    '<p class="sheet-note">' + esc(favSummary(f)) + "</p>" +
+    (f.notes ? '<div class="field"><span class="lbl">Notas</span><div class="sub" style="margin:0;white-space:pre-wrap">' + esc(f.notes) + "</div></div>" : "") +
+    '<div class="btn-stack"><button class="btn primary" type="button" id="favUse">Crear tarea con este favorito</button>' +
+    '<button class="btn ghost" type="button" id="favDel">Quitar de favoritos</button>' +
+    '<button class="btn ghost" type="button" id="favClose">Cerrar</button></div>'
+  );
+  $("#favUse").addEventListener("click", () => openTaskForm({ fav: f }));
+  $("#favDel").addEventListener("click", () => { drop("favs", f.id); closeSheet(); toast("Quitado de favoritos"); });
+  $("#favClose").addEventListener("click", closeSheet);
 }
 function memberChips(id, cur, includeAny, includeAll){
   return '<div class="chips" id="' + id + '">' +
@@ -1160,11 +1192,19 @@ function openTaskForm(opts){
   opts = opts || {};
   const editing = opts.task || null;
   const admin = isAdmin();
+  const fav = !editing && opts.fav ? opts.fav : null;
   const d = editing ? Object.assign({}, editing) : {
     title:"", kind: opts.kind || "casa", study_type: opts.kind === "estudio" ? "deberes" : null, subject:"",
     assignee: admin ? (tab === "hoy" && member(filters.hoy) && filters.hoy !== meId ? filters.hoy : "") : meId,
     points: admin ? 10 : 0, freq:"none", due:"", needs_ok:true, notes:""
   };
+  if (fav) Object.assign(d, {
+    title: fav.title || "", kind: fav.kind || "casa", study_type: fav.kind === "estudio" ? (fav.study_type || "deberes") : null,
+    subject: fav.subject || "", points: admin ? Number(fav.points) || 0 : 0, freq: fav.freq || "none",
+    needs_ok: fav.needs_ok !== false, notes: fav.notes || ""
+  });
+  const favs = sortedFavs();
+  const favOf = (title) => (state.favs || []).find((f) => (f.title || "").trim().toLowerCase() === (title || "").trim().toLowerCase());
   d.rot = editing ? rotationOf(editing) : [];
   d.isTeam = editing ? isTeam(editing) : false;
   d.teamSel = editing && isTeam(editing) ? teamOf(editing)
@@ -1174,7 +1214,9 @@ function openTaskForm(opts){
 
   const html =
     "<h2>" + (editing ? "Editar" : d.kind === "estudio" ? "Nuevo estudio" : "Nueva tarea") + "</h2>" +
-    '<p class="sheet-note">' + (admin ? "Solo el título es obligatorio." : "Puedes apuntar tus propias tareas y deberes. Los puntos los pone un adulto.") + "</p>" +
+    '<p class="sheet-note">' + (fav ? "Rellenada con el favorito «" + esc(fav.title) + "». Cambia lo que quieras." : admin ? "Solo el título es obligatorio." : "Puedes apuntar tus propias tareas y deberes. Los puntos los pone un adulto.") + "</p>" +
+    (!editing && favs.length ? '<div class="field"><span class="lbl">⭐ Favoritos</span><div class="chips" id="fFavs">' +
+      favs.map((f) => '<button class="chip fav" type="button" data-id="' + esc(f.id) + '" aria-pressed="' + !!(fav && fav.id === f.id) + '">' + esc(favLabel(f)) + "</button>").join("") + "</div></div>" : "") +
     '<div class="field"><label for="fTitle">Qué hay que hacer</label><input id="fTitle" type="text" value="' + esc(d.title) + '" placeholder="Hacer la cama" autocomplete="off" maxlength="120"></div>' +
     (editing ? "" : '<div class="field" id="fIdeasWrap"><span class="lbl">Ideas</span><div class="chips" id="fIdeas"></div></div>') +
     '<div class="field"><span class="lbl">Tipo</span><div class="segs" id="fKind">' +
@@ -1204,6 +1246,7 @@ function openTaskForm(opts){
         '<div class="field"><span class="lbl">Revisión</span><button class="switch" type="button" id="fOk" aria-pressed="' + (d.needs_ok !== false) + '"><span class="k">Un adulto la aprueba</span><span class="tg"></span></button></div></div>'
       : "") +
     '<div class="field"><label for="fNotes">Notas</label><textarea id="fNotes" placeholder="Detalles, temas que entran…" maxlength="600">' + esc(d.notes || "") + "</textarea></div>" +
+    (admin ? '<div class="field"><button class="switch" type="button" id="fFav" aria-pressed="' + !!(editing ? favOf(d.title) : fav) + '"><span class="k">⭐ Guardar como favorito<small class="by" style="display:block">Para crearla otra vez con un toque (sin la persona)</small></span><span class="tg"></span></button></div>' : "") +
     '<p class="err" id="fErr"></p>' +
     '<div class="btn-stack"><button class="btn primary" type="button" id="fSave">' + (editing ? "Guardar cambios" : "Crear") + "</button>" +
     '<button class="btn ghost" type="button" id="fCancel">Cancelar</button></div>';
@@ -1216,6 +1259,12 @@ function openTaskForm(opts){
     box.querySelectorAll(".chip").forEach((b) => b.addEventListener("click", () => { $("#fTitle").value = b.textContent; }));
   };
   paintIdeas();
+  $$("#fFavs .chip").forEach((b) => b.addEventListener("click", () => {
+    const f = state.favs.find((x) => x.id === b.dataset.id);
+    if (f) openTaskForm({ fav: f, kind: opts.kind });
+  }));
+  const favSw = $("#fFav");
+  if (favSw) favSw.addEventListener("click", () => favSw.setAttribute("aria-pressed", String(favSw.getAttribute("aria-pressed") !== "true")));
   const syncDueLabel = () => { $("#fDueLbl").textContent = isExam(d) ? "Fecha del examen" : "Para cuándo (opcional)"; };
   pick("#fKind .seg", "v", (v) => {
     d.kind = v; $("#fStudy").hidden = v !== "estudio";
@@ -1303,9 +1352,22 @@ function openTaskForm(opts){
       archived: false,
       created_at: editing ? editing.created_at : undefined
     };
-    put("tasks", row);
+    put("tasks", row, true);
+    let favMsg = "";
+    if (favSw) {
+      const old = favOf(title);
+      if (favSw.getAttribute("aria-pressed") === "true") {
+        put("favs", {
+          id: old ? old.id : uid(), title, kind: row.kind, study_type: row.study_type, subject: row.subject,
+          points: row.points, freq: row.freq, needs_ok: row.needs_ok, notes: row.notes,
+          created_by: old ? old.created_by : meId, created_at: old ? old.created_at : undefined
+        }, true);
+        favMsg = old ? " · favorito actualizado" : " · guardada en favoritos";
+      } else if (old) { drop("favs", old.id, true); favMsg = " · quitada de favoritos"; }
+    }
+    render();
     closeSheet();
-    toast(editing ? "Guardado" : "Tarea creada");
+    toast((editing ? "Guardado" : "Tarea creada") + favMsg);
   });
   if (!editing) setTimeout(() => { const el = $("#fTitle"); if (el) el.focus(); }, 120);
 }

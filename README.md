@@ -11,6 +11,10 @@ Web app instalable, hermana de Despensar. Cada miembro entra con su perfil y su 
   para **«cualquiera»** (la hace uno, el primero que pueda) o para **«todos»** (cada uno la
   suya: hacer la cama, lavarse los dientes…). En las de «todos» cada uno la marca por su
   cuenta, gana sus puntos, y en la lista se ve el progreso (p. ej. «Todos · 2/3»).
+- **Favoritos**: al crear o editar una tarea, un admin puede activar «Guardar como favorito».
+  Sale arriba en «Nueva tarea»: un toque rellena título, tipo, repetición, puntos, revisión y
+  notas (no la persona). Se gestionan en Familia → «Tareas favoritas». Necesita `security.sql`
+  actualizado.
 - **Turnos rotativos**: en una tarea que se repite, elige 2 o más personas en orden
   y la app reparte sola a quién le toca cada día (o cada día laborable, o cada semana).
   Un admin puede «pasar el turno al siguiente» si alguien no puede ese día.
