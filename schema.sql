@@ -100,6 +100,10 @@ create table if not exists fh_points (
 alter table fh_tasks add column if not exists rotation  text;
 alter table fh_tasks add column if not exists rot_start date;
 
+-- «Todos»: lista de ids de miembros que tienen que hacer la tarea CADA UNO
+-- (hacer la cama, lavarse los dientes…). Si está vacía, es una tarea normal.
+alter table fh_tasks add column if not exists team text;
+
 -- Fotos de perfil (una por miembro, id = id del miembro). Van aparte para que
 -- la app solo las descargue cuando cambian. Son JPEG pequeños (192 px) en texto.
 create table if not exists fh_photos (
@@ -118,15 +122,14 @@ create index if not exists fh_rewards_home on fh_rewards (home);
 create index if not exists fh_claims_home  on fh_claims  (home);
 create index if not exists fh_points_home  on fh_points  (home);
 
--- Acceso con la clave pública (anon), igual que en Despensar:
--- puede leer y escribir en estas tablas y en nada más.
+-- Acceso: aquí solo se activa RLS (sin permisos para la clave pública).
+-- Quién puede leer y cambiar qué lo decide security.sql: ejecútalo después.
 do $$
 declare t text;
 begin
   foreach t in array array['fh_members','fh_tasks','fh_done','fh_rewards','fh_claims','fh_points','fh_photos'] loop
     execute format('alter table %I enable row level security', t);
     execute format('drop policy if exists "fh anon" on %I', t);
-    execute format('create policy "fh anon" on %I for all to anon using (true) with check (true)', t);
-    execute format('grant select, insert, update, delete on %I to anon', t);
+    execute format('revoke all on %I from anon, authenticated', t);
   end loop;
 end $$;

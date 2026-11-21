@@ -397,9 +397,41 @@ function periodOf(t, d){
   if (t.freq === "weekly") return toISO(mondayOf(d));
   return "once";
 }
-const doneId = (t, period) => t.id + "|" + period;
-function doneFor(t, d){ const id = doneId(t, periodOf(t, d)); return state.done.find((x) => x.id === id) || null; }
-function statusOf(t){ const d = doneFor(t); return d ? d.status : "todo"; }
+/* --- tareas de «todos» ---
+   t.team = "id1,id2,…": CADA uno tiene que hacerla (su cama, sus dientes).
+   Hay una fila hecha por persona: id = tarea|periodo|persona. */
+function teamOf(t){ return t.team ? String(t.team).split(",").map((x) => x.trim()).filter((id) => member(id)) : []; }
+const isTeam = (t) => teamOf(t).length > 0;
+let ctxMember = "";     // persona desde cuya vista se está pintando (Hoy de X, filtro de la lista…)
+const doneId = (t, period, mid) => t.id + "|" + period + (isTeam(t) ? "|" + mid : "");
+/* En una tarea de «todos», de quién hablamos: la persona de la vista si está en el equipo,
+   si no yo si estoy, si no nadie (vista de conjunto). */
+function subjectOf(t, mid){
+  const tm = teamOf(t);
+  if (mid && tm.includes(mid)) return mid;
+  if (!mid && ctxMember && tm.includes(ctxMember)) return ctxMember;
+  if (!mid && tm.includes(meId)) return meId;
+  return null;
+}
+function teamProgress(t, d){
+  const p = periodOf(t, d), tm = teamOf(t);
+  const rows = tm.map((id) => state.done.find((x) => x.id === doneId(t, p, id)) || null);
+  return { tm, rows, ok: rows.filter((r) => r && r.status === "ok").length, done: rows.filter((r) => r && r.status !== "no").length };
+}
+function doneFor(t, d, mid){
+  if (isTeam(t)) {
+    const who = subjectOf(t, mid);
+    return who ? state.done.find((x) => x.id === doneId(t, periodOf(t, d), who)) || null : null;
+  }
+  return state.done.find((x) => x.id === doneId(t, periodOf(t, d))) || null;
+}
+function statusOf(t, mid){
+  if (isTeam(t) && !subjectOf(t, mid)) {         // vista de conjunto: hecha cuando la han hecho todos
+    const tp = teamProgress(t);
+    return tp.ok === tp.tm.length ? "ok" : tp.done === tp.tm.length ? "pending" : "todo";
+  }
+  const d = doneFor(t, undefined, mid); return d ? d.status : "todo";
+}
 const isExam = (t) => t.kind === "estudio" && t.study_type === "examen";
 /* --- turnos rotativos ---
    t.rotation = "id1,id2,id3" (en orden) y t.rot_start = día en que le toca al primero.
@@ -435,13 +467,19 @@ function nextTurns(t, count){
 /* En «Hoy» cuenta a quién le toca hoy; en las listas, cualquiera que esté en el turno. */
 function forMember(t, id, anyTurn){
   if (id === "all") return true;
+  if (isTeam(t)) return teamOf(t).includes(id);
   if (anyTurn && rotationOf(t).includes(id)) return true;
   const a = assigneeOn(t);
   return !a || a === id;
 }
 
 /* Un miembro puede marcar sus tareas (o su turno de hoy) y las de «cualquiera». Un admin, todas. */
-function canMark(t){ const m = me(); const a = assigneeOn(t); return !!m && (m.role === "admin" || !a || a === m.id); }
+function canMark(t){
+  const m = me(); if (!m) return false;
+  if (m.role === "admin") return true;
+  if (isTeam(t)) return teamOf(t).includes(m.id);
+  const a = assigneeOn(t); return !a || a === m.id;
+}
 /* Un miembro solo puede editar lo que él mismo creó y aún no está aprobado. */
 function canEdit(t){
   if (isAdmin()) return true;
@@ -466,7 +504,15 @@ function tick(t, creditTo){
   if (!m) { openWho(); return; }
   if (!canMark(t)) { explainLocked(t); return; }
   const period = periodOf(t);
-  const id = doneId(t, period);
+  let who;
+  if (isTeam(t)) {
+    // cada uno marca la suya; un admin marca la de la persona que está mirando
+    who = creditTo || (isAdmin() ? subjectOf(t) : (teamOf(t).includes(m.id) ? m.id : null));
+    if (!who) { openTask(t); return; }          // vista de conjunto: elegir a quién
+  } else {
+    who = creditTo || (isAdmin() && assigneeOn(t) ? assigneeOn(t) : m.id);
+  }
+  const id = doneId(t, period, who);
   const ex = state.done.find((x) => x.id === id);
 
   if (ex && ex.status !== "no" && !creditTo) {
@@ -475,7 +521,6 @@ function tick(t, creditTo){
     toast(ex.status === "ok" ? "Ya está aprobada ✔" : "Esperando revisión");
     return;
   }
-  const who = creditTo || (isAdmin() && assigneeOn(t) ? assigneeOn(t) : m.id);
   const auto = isAdmin() || !t.needs_ok;
   const pts = Number(t.points) || 0;
   const row = { id, task_id:t.id, member_id:who, period, status: auto ? "ok" : "pending",
@@ -557,21 +602,27 @@ function peopleHTML(cur, withAll){
 function taskHTML(t, opts){
   opts = opts || {};
   const d = doneFor(t);
-  const st = d ? d.status : "todo";
+  const team = isTeam(t), subj = team ? subjectOf(t) : null;
+  const st = team && !subj ? statusOf(t) : (d ? d.status : "todo");
   const exam = isExam(t);
   const pills = [];
+  if (team) {
+    const tp = teamProgress(t);
+    pills.push('<span class="pill team">👨‍👩‍👧 Todos' + (subj ? "" : " · " + tp.ok + "/" + tp.tm.length) + "</span>");
+  }
   if (t.kind === "estudio") pills.push('<span class="pill est">' + esc([STUDY[t.study_type] || "Estudio", t.subject].filter(Boolean).join(" · ")) + "</span>");
   if (t.freq && t.freq !== "none") pills.push('<span class="pill">' + FREQ[t.freq] + "</span>");
   if (rotationOf(t).length) pills.push('<span class="pill turn">🔁 Turnos</span>');
   if (t.due && st !== "ok") { const di = dueInfo(t.due, exam); if (di) pills.push('<span class="pill ' + di.cls + '">' + esc(di.label) + "</span>"); }
   if (st === "pending") pills.push('<span class="pill pending">Por revisar</span>');
   if (st === "no") pills.push('<span class="pill no">Rechazada · repítela</span>');
-  if (d && st !== "no" && d.member_id && d.member_id !== assigneeOn(t)) {
+  if (!team && d && st !== "no" && d.member_id && d.member_id !== assigneeOn(t)) {
     const who = member(d.member_id);
     if (who) pills.push('<span class="by">hecha por ' + esc(who.name) + "</span>");
   }
   if (t.grade) pills.push('<span class="pill gold">Nota: ' + esc(t.grade) + "</span>");
-  const locked = !canMark(t) || (st === "ok" && !isAdmin()) || (st === "pending" && d.member_id !== meId && !isAdmin());
+  const locked = team && !subj ? !isAdmin()
+    : !canMark(t) || (team && !isAdmin() && subj !== meId) || (st === "ok" && !isAdmin()) || (st === "pending" && d && d.member_id !== meId && !isAdmin());
   const tickIcon = st === "ok" ? ICONS.check : st === "pending" ? ICONS.wait : "";
   const tickLabel = st === "ok" ? "Hecha" : st === "pending" ? "Pendiente de revisión" : "Marcar como hecha";
   return '<div class="task" data-kind="' + esc(t.kind) + '" data-st="' + st + '">' +
@@ -581,7 +632,7 @@ function taskHTML(t, opts){
       (pills.length ? '<span class="sub">' + pills.join("") + "</span>" : "") +
     "</button>" +
     (Number(t.points) ? '<span class="pts">+' + Number(t.points) + "</span>" : "") +
-    (opts.noAvatar ? "" : av(member(assigneeOn(t)), "sm")) +
+    (opts.noAvatar ? "" : team ? '<span class="av any sm" title="Todos">👨‍👩‍👧</span>' : av(member(assigneeOn(t)), "sm")) +
     "</div>";
 }
 const listHTML = (arr, opts) => '<div class="list">' + arr.map((t) => taskHTML(t, opts)).join("") + "</div>";
@@ -627,7 +678,7 @@ function render(){
 function todayRemaining(id){
   const d = today0();
   return state.tasks.filter((t) => !isExam(t) && isActiveOn(t, d) && forMember(t, id) &&
-    (t.freq !== "none" || !t.due || daysUntil(t.due) <= 0) && ["todo","no"].includes(statusOf(t))).length;
+    (t.freq !== "none" || !t.due || daysUntil(t.due) <= 0) && ["todo","no"].includes(statusOf(t, id))).length;
 }
 
 function paintTabs(){
@@ -683,6 +734,7 @@ function renderHoy(){
   const fid = member(filters.hoy) ? filters.hoy : meId;
   const fm = member(fid);
   const d = today0();
+  ctxMember = fid;
   const mine = state.tasks.filter((t) => !t.archived && forMember(t, fid));
 
   const overdue = [], today = [], doneToday = [], upcoming = [], exams = [];
@@ -690,7 +742,7 @@ function renderHoy(){
     const st = statusOf(t);
     // una tarea de «cualquiera» que ya hizo otra persona deja de ser de este día
     const dn0 = doneFor(t);
-    if (!assigneeOn(t) && dn0 && dn0.status !== "no" && dn0.member_id !== fid) return;
+    if (!isTeam(t) && !assigneeOn(t) && dn0 && dn0.status !== "no" && dn0.member_id !== fid) return;
     if (isExam(t)) {
       const n = daysUntil(t.due);
       if (st !== "ok" && n !== null && n >= 0 && n <= 14) exams.push(t);
@@ -745,6 +797,7 @@ function renderHoy(){
 function renderList(kind){
   const key = kind === "casa" ? "casa" : "estudios";
   const fid = filters[key] === "all" || member(filters[key]) ? filters[key] : "all";
+  ctxMember = fid === "all" ? "" : fid;
   const all = state.tasks.filter((t) => t.kind === kind && !t.archived && forMember(t, fid, true));
   let html = peopleHTML(fid, true);
 
@@ -890,6 +943,8 @@ view.addEventListener("click", (e) => {
 });
 
 function explainLocked(t){
+  if (isTeam(t) && !teamOf(t).includes(meId)) { toast("Esta la tiene que hacer cada uno: no estás en la lista"); return; }
+  if (isTeam(t) && subjectOf(t) !== meId) { toast("Cada uno marca la suya"); return; }
   const st = statusOf(t);
   if (st === "ok") toast("Ya está aprobada ✔");
   else if (st === "pending") toast("Esperando revisión");
@@ -958,17 +1013,20 @@ function stepper(minusSel, plusSel, inputSel, step, allowNeg){
   $(plusSel).addEventListener("click", () => { inp.value = (Number(inp.value) || 0) + step; });
   return inp;
 }
-function memberChips(id, cur, includeAny){
+function memberChips(id, cur, includeAny, includeAll){
   return '<div class="chips" id="' + id + '">' +
     (includeAny ? '<button class="chip" type="button" data-m="" aria-pressed="' + (!cur) + '">👥 Cualquiera</button>' : "") +
+    (includeAll ? '<button class="chip" type="button" data-m="__all" aria-pressed="' + (cur === "__all") + '">👨‍👩‍👧 Todos</button>' : "") +
     sortedMembers().map((m) => '<button class="chip pchip" type="button" data-m="' + esc(m.id) + '" aria-pressed="' + (cur === m.id) + '">' +
       av(m, "sm") + esc(m.name) + "</button>").join("") + "</div>";
 }
 
 /* ---- detalle de tarea ---- */
 function openTask(t){
-  const d = doneFor(t);
-  const st = d ? d.status : "todo";
+  const team = isTeam(t);
+  const subj = team ? (teamOf(t).includes(meId) ? meId : null) : null;   // en el detalle, «la mía»
+  const d = team ? (subj ? doneFor(t, undefined, subj) : null) : doneFor(t);
+  const st = team && !subj ? statusOf(t, "__nadie__") : (d ? d.status : "todo");
   const asg = member(assigneeOn(t));
   const rot = rotationOf(t);
   const exam = isExam(t);
@@ -997,8 +1055,9 @@ function openTask(t){
           '<div class="h' + (i === 0 ? " now" : "") + '">' + av(member(x.id), "sm") + '<span class="d">' + esc(turnLabel(t, x.d, i)) + "</span><b>" + esc((member(x.id) || {}).name || "") + "</b></div>").join("") + "</div>" +
         '<div class="help">Orden: ' + rot.map((id) => esc(member(id).name)).join(" → ") + ".</div>" +
         (isAdmin() ? '<button class="mini" type="button" id="tSkip" style="margin-top:8px">Pasar el turno al siguiente</button>' : "") + "</div>"
+      : team ? teamDetailHTML(t)
       : '<div class="field"><span class="lbl">Para</span><div class="sub" style="margin:0">' + av(asg, "sm") + " " + esc(asg ? asg.name : "Cualquiera") + "</div></div>") +
-    '<div class="field"><span class="lbl">Estado</span><div class="sub" style="margin:0">' + stTxt + "</div></div>" +
+    (team && !subj ? "" : '<div class="field"><span class="lbl">' + (team ? "La tuya" : "Estado") + '</span><div class="sub" style="margin:0">' + stTxt + "</div></div>") +
     (t.notes ? '<div class="notes">' + esc(t.notes) + "</div>" : "");
 
   if (exam && (isAdmin() || t.created_by === meId || assigneeOn(t) === meId)) {
@@ -1012,13 +1071,15 @@ function openTask(t){
   }
 
   html += '<div class="btn-stack">';
-  if (st === "pending" && isAdmin()) {
+  if (team && !subj) {
+    // admin fuera del equipo: se gestiona desde la lista de cada persona
+  } else if (st === "pending" && isAdmin()) {
     html += '<div class="btn-row"><button class="btn danger" type="button" id="tNo">Rechazar</button><button class="btn good" type="button" id="tOk">Aprobar' + (Number(d.points) ? " +" + d.points + " ⭐" : "") + "</button></div>";
   } else if (canMark(t)) {
     if (st === "todo" || st === "no") html += '<button class="btn good" type="button" id="tTick">' + ICONS.check + " Marcar como hecha</button>";
     else if ((st === "pending" && d.member_id === meId) || (st === "ok" && isAdmin())) html += '<button class="btn ghost" type="button" id="tTick">Desmarcar</button>';
   }
-  if (isAdmin() && (st === "todo" || st === "no") && state.members.length > 1) {
+  if (!team && isAdmin() && (st === "todo" || st === "no") && state.members.length > 1) {
     html += '<div class="field" style="margin:6px 0 0"><span class="lbl">La ha hecho…</span>' + memberChips("tCredit", "", false) +
       '<div class="help">Márcala como hecha y aprobada a nombre de otra persona.</div></div>';
   }
@@ -1049,6 +1110,28 @@ function openTask(t){
   $$("#tCredit .chip").forEach((b) => b.addEventListener("click", () => {
     lastTickRect = null; tick(t, b.dataset.m); closeSheet();
   }));
+  // tareas de «todos»: el admin marca o aprueba a cada persona desde su fila
+  $$("#tTeam [data-tm]").forEach((b) => b.addEventListener("click", () => {
+    const mid = b.dataset.tm, row = state.done.find((x) => x.id === doneId(t, periodOf(t), mid));
+    lastTickRect = null;
+    if (b.dataset.do === "ok" && row) review(row, true);
+    else tick(t, mid);
+    openTask(state.tasks.find((x) => x.id === t.id) || t);
+  }));
+}
+
+function teamDetailHTML(t){
+  const tp = teamProgress(t);
+  const when = t.freq === "weekly" ? "esta semana" : t.freq === "none" ? "" : "hoy";
+  return '<div class="field"><span class="lbl">Cada uno la suya' + (when ? " · " + when : "") + " · " + tp.ok + "/" + tp.tm.length + '</span><div class="hist" id="tTeam">' +
+    tp.tm.map((id, i) => {
+      const r = tp.rows[i], st = r ? r.status : "todo", m = member(id);
+      const pill = st === "ok" ? '<span class="pill ok">Hecha</span>' : st === "pending" ? '<span class="pill pending">Por revisar</span>'
+                 : st === "no" ? '<span class="pill no">Rechazada</span>' : '<span class="pill">Sin hacer</span>';
+      const btn = !isAdmin() ? "" : st === "pending" ? '<button class="mini" type="button" data-tm="' + esc(id) + '" data-do="ok">Aprobar</button>'
+                 : st === "ok" ? "" : '<button class="mini" type="button" data-tm="' + esc(id) + '" data-do="mark">Hecha</button>';
+      return '<div class="h">' + av(m, "sm") + '<span class="d">' + esc(m.name) + "</span>" + pill + btn + "</div>";
+    }).join("") + "</div></div>";
 }
 
 function turnLabel(t, d, i){
@@ -1082,6 +1165,10 @@ function openTaskForm(opts){
     points: admin ? 10 : 0, freq:"none", due:"", needs_ok:true, notes:""
   };
   d.rot = editing ? rotationOf(editing) : [];
+  d.isTeam = editing ? isTeam(editing) : false;
+  d.teamSel = editing && isTeam(editing) ? teamOf(editing)
+    : (state.members.filter((m) => m.role !== "admin").map((m) => m.id));
+  if (!d.teamSel.length) d.teamSel = state.members.map((m) => m.id);
   const subjects = [...new Set(SUBJECTS.concat(state.tasks.map((t) => t.subject).filter(Boolean)))];
 
   const html =
@@ -1103,7 +1190,11 @@ function openTaskForm(opts){
     (admin ? '<div class="field" id="fRotWrap"' + (d.freq === "none" || state.members.length < 2 ? " hidden" : "") + '><span class="lbl">Por turnos</span><div class="chips" id="fRot">' +
       sortedMembers().map((m) => '<button class="chip pchip" type="button" data-m="' + esc(m.id) + '" aria-pressed="false">' + av(m, "sm") + esc(m.name) + '<b class="ord"></b></button>').join("") +
       '</div><div class="help" id="fRotHelp"></div></div>' : "") +
-    (admin ? '<div class="field" id="fWhoWrap"><span class="lbl">Para quién</span>' + memberChips("fWho", d.assignee || "", true) + "</div>" : "") +
+    (admin ? '<div class="field" id="fWhoWrap"><span class="lbl">Para quién</span>' + memberChips("fWho", d.isTeam ? "__all" : (d.assignee || ""), true, state.members.length > 1) +
+      '<div class="help" id="fWhoHelp"></div>' +
+      '<div id="fTeamWrap" style="margin-top:10px"' + (d.isTeam ? "" : " hidden") + '><span class="lbl">¿Quiénes?</span><div class="chips" id="fTeam">' +
+        sortedMembers().map((m) => '<button class="chip pchip" type="button" data-m="' + esc(m.id) + '" aria-pressed="' + d.teamSel.includes(m.id) + '">' + av(m, "sm") + esc(m.name) + "</button>").join("") +
+      "</div></div></div>" : "") +
     '<div class="field" id="fDueWrap"' + (d.freq === "none" ? "" : " hidden") + '><label for="fDue" id="fDueLbl">' + (isExam(d) ? "Fecha del examen" : "Para cuándo (opcional)") + "</label>" +
       '<input id="fDue" type="date" value="' + esc(d.due || "") + '"></div>' +
     (admin
@@ -1136,10 +1227,24 @@ function openTaskForm(opts){
     syncDueLabel();
   });
   $$("#fSubj .chip").forEach((b) => b.addEventListener("click", () => { $("#fSubject").value = b.dataset.v; }));
-  pick("#fWho .chip", "m", (v) => { d.assignee = v; });
+  const whoHelp = () => {
+    const h = $("#fWhoHelp"); if (!h) return;
+    h.textContent = d.isTeam ? "Cada persona tiene que hacer la suya, y cada una gana sus puntos."
+                  : !d.assignee ? "La hace uno, el primero que pueda." : "";
+  };
+  pick("#fWho .chip", "m", (v) => {
+    d.isTeam = v === "__all"; d.assignee = d.isTeam ? "" : v;
+    $("#fTeamWrap").hidden = !d.isTeam; whoHelp(); paintRot();
+  });
+  $$("#fTeam .chip").forEach((b) => b.addEventListener("click", () => {
+    const id = b.dataset.m, i = d.teamSel.indexOf(id);
+    if (i >= 0) d.teamSel.splice(i, 1); else d.teamSel.push(id);
+    b.setAttribute("aria-pressed", String(i < 0));
+  }));
+  if (admin) whoHelp();
   const paintRot = () => {
     if (!$("#fRot")) return;
-    const on = d.freq !== "none" && d.rot.length >= 2;
+    const on = d.freq !== "none" && d.rot.length >= 2 && !d.isTeam;
     $$("#fRot .chip").forEach((b) => {
       const i = d.rot.indexOf(b.dataset.m);
       b.setAttribute("aria-pressed", String(i >= 0));
@@ -1152,7 +1257,7 @@ function openTaskForm(opts){
           ? "hoy le toca a " + member(assigneeOn(editing)).name + "."
           : "empieza " + member(d.rot[0]).name + " hoy.")
       : d.rot.length === 1 ? "Elige al menos otra persona." : "Opcional: toca 2 o más personas en el orden en que les toca.";
-    $("#fRotWrap").hidden = d.freq === "none" || state.members.length < 2;
+    $("#fRotWrap").hidden = d.freq === "none" || state.members.length < 2 || d.isTeam;
     $("#fWhoWrap").hidden = on;
   };
   $$("#fRot .chip").forEach((b) => b.addEventListener("click", () => {
@@ -1172,17 +1277,21 @@ function openTaskForm(opts){
     if (!title) { $("#fErr").textContent = "Escribe qué hay que hacer."; $("#fTitle").focus(); return; }
     const due = d.freq === "none" ? ($("#fDue").value || null) : null;
     if (isExam(d) && !due) { $("#fErr").textContent = "Pon la fecha del examen."; return; }
+    const keepTeam = admin && d.isTeam;
+    if (keepTeam && !d.teamSel.length) { $("#fErr").textContent = "Elige al menos a una persona."; return; }
+    const team = keepTeam ? sortedMembers().map((m) => m.id).filter((id) => d.teamSel.includes(id)).join(",")
+                          : (admin ? null : (editing ? editing.team || null : null));
     const prevRot = editing ? (editing.rotation || null) : null;
-    const rotation = admin ? (d.freq !== "none" && d.rot.length >= 2 ? d.rot.join(",") : null) : prevRot;
+    const rotation = team ? null : admin ? (d.freq !== "none" && d.rot.length >= 2 ? d.rot.join(",") : null) : prevRot;
     const rot_start = !rotation ? null
       : (editing && editing.rot_start && prevRot === rotation && editing.freq === d.freq) ? editing.rot_start : toISO(today0());
     const row = {
       id: editing ? editing.id : uid(),
-      rotation, rot_start,
+      rotation, rot_start, team,
       title, kind:d.kind,
       study_type: d.kind === "estudio" ? (d.study_type || "deberes") : null,
       subject: d.kind === "estudio" ? ($("#fSubject").value.trim() || null) : null,
-      assignee: rotation ? null : admin ? (d.assignee || null) : (editing ? editing.assignee : meId),
+      assignee: rotation || team ? null : admin ? (d.assignee || null) : (editing ? editing.assignee : meId),
       points: admin ? Math.max(0, Math.round(Number($("#fPts").value) || 0)) : (editing ? Number(editing.points) || 0 : 0),
       freq: d.freq || "none",
       due,

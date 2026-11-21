@@ -2,7 +2,7 @@
    Guarda la app en el móvil para que abra al instante y funcione sin cobertura.
    Los datos NUNCA se cachean aquí: eso lo gestiona la propia app. */
 
-const VERSION = "funnyhouse-v4";
+const VERSION = "funnyhouse-v5";
 const SHELL = [
   "./",
   "./index.html",

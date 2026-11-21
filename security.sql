@@ -18,6 +18,9 @@
 
 create extension if not exists pgcrypto with schema extensions;
 
+-- Por si schema.sql es de una versión anterior: columna de las tareas de «todos».
+alter table fh_tasks add column if not exists team text;
+
 -- Sesiones de cada móvil y control de intentos de PIN.
 create table if not exists fh_sessions (
   token       text primary key,
@@ -212,7 +215,7 @@ declare
   vp fh_points;
   vr fh_rewards; rw fh_rewards;
   ec fh_claims;  vc fh_claims;
-  ph text;
+  ph text; v_expected text; v_mine boolean;
 begin
   a := fh__actor(p_token); h := a.home; adm := a.role = 'admin';
   if jsonb_typeof(p_ops) is distinct from 'array' or jsonb_array_length(p_ops) > 300 then
@@ -281,15 +284,17 @@ begin
         if vt.title is null or length(btrim(vt.title)) not between 1 and 120 then perform fh__deny(i, 'Título no válido'); end if;
         if not adm then
           if et.id is null then
-            vt.assignee := a.id; vt.points := 0; vt.needs_ok := true; vt.rotation := null; vt.rot_start := null;
+            vt.assignee := a.id; vt.points := 0; vt.needs_ok := true; vt.rotation := null; vt.rot_start := null; vt.team := null;
             vt.created_by := a.id; vt.archived := false;
           elsif et.created_by = a.id then
             if exists (select 1 from fh_done where home = h and task_id = k and status = 'ok') then
               perform fh__deny(i, 'Ya tiene una vez aprobada: pide a un adulto que la cambie');
             end if;
             vt.assignee := et.assignee; vt.points := et.points; vt.needs_ok := et.needs_ok;
-            vt.rotation := et.rotation; vt.rot_start := et.rot_start; vt.created_by := et.created_by; vt.archived := et.archived;
-          elsif et.assignee = a.id or a.id = any(string_to_array(coalesce(et.rotation, ''), ',')) then
+            vt.rotation := et.rotation; vt.rot_start := et.rot_start; vt.team := et.team;
+            vt.created_by := et.created_by; vt.archived := et.archived;
+          elsif et.assignee = a.id or a.id = any(string_to_array(coalesce(et.rotation, ''), ','))
+                or a.id = any(string_to_array(coalesce(et.team, ''), ',')) then
             -- en una tarea de otro, solo puede apuntar la nota del examen
             update fh_tasks set grade = left(vt.grade, 20), updated_at = now() where id = k and home = h;
             continue;
@@ -301,10 +306,10 @@ begin
         insert into fh_tasks select (vt).*
           on conflict (id) do update set
             (title, kind, study_type, subject, assignee, points, freq, due, needs_ok, notes, grade,
-             created_by, archived, rotation, rot_start, updated_at)
+             created_by, archived, rotation, rot_start, team, updated_at)
           = (excluded.title, excluded.kind, excluded.study_type, excluded.subject, excluded.assignee, excluded.points,
              excluded.freq, excluded.due, excluded.needs_ok, excluded.notes, excluded.grade,
-             excluded.created_by, excluded.archived, excluded.rotation, excluded.rot_start, excluded.updated_at)
+             excluded.created_by, excluded.archived, excluded.rotation, excluded.rot_start, excluded.team, excluded.updated_at)
           where fh_tasks.home = h;
       end if;
 
@@ -321,12 +326,18 @@ begin
         vd := jsonb_populate_record(null::fh_done, r);
         select * into t from fh_tasks where id = vd.task_id and home = h;
         if t.id is null then perform fh__deny(i, 'La tarea ya no existe'); end if;
-        if k <> t.id || '|' || coalesce(vd.period, '') then perform fh__deny(i, 'Periodo no válido'); end if;
+        -- en las tareas de «todos» hay una fila por persona: tarea|periodo|persona
+        v_expected := t.id || '|' || coalesce(vd.period, '');
+        if coalesce(t.team, '') <> '' then v_expected := v_expected || '|' || coalesce(vd.member_id, ''); end if;
+        if k is distinct from v_expected then perform fh__deny(i, 'Periodo no válido'); end if;
         if not adm then
           if vd.member_id is distinct from a.id then perform fh__deny(i, 'Solo puedes marcar tus tareas'); end if;
-          if not (t.assignee is null or t.assignee = a.id or a.id = any(string_to_array(coalesce(t.rotation, ''), ','))) then
-            perform fh__deny(i, 'Esta tarea no es tuya');
+          if coalesce(t.team, '') <> '' then
+            v_mine := a.id = any(string_to_array(t.team, ','));
+          else
+            v_mine := t.assignee is null or t.assignee = a.id or a.id = any(string_to_array(coalesce(t.rotation, ''), ','));
           end if;
+          if not coalesce(v_mine, false) then perform fh__deny(i, 'Esta tarea no es tuya'); end if;
           if ed.status = 'ok' then perform fh__deny(i, 'Ya está aprobada'); end if;
           if ed.status = 'pending' and ed.member_id <> a.id then perform fh__deny(i, 'Ya la marcó otra persona'); end if;
           vd.points := t.points;

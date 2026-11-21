@@ -7,8 +7,10 @@ Web app instalable, hermana de Despensar. Cada miembro entra con su perfil y su 
 
 - **Hoy**: lo que le toca a cada uno hoy, con barra de progreso y sus puntos.
   Los admin ven aquí la cola de **Por revisar** (tareas marcadas) y los **premios pedidos**.
-- **Casa**: tareas puntuales, diarias, de entre semana o semanales. Para alguien en concreto
-  o para «cualquiera» (se la lleva quien la haga primero).
+- **Casa**: tareas puntuales, diarias, de entre semana o semanales. Para alguien en concreto,
+  para **«cualquiera»** (la hace uno, el primero que pueda) o para **«todos»** (cada uno la
+  suya: hacer la cama, lavarse los dientes…). En las de «todos» cada uno la marca por su
+  cuenta, gana sus puntos, y en la lista se ve el progreso (p. ej. «Todos · 2/3»).
 - **Turnos rotativos**: en una tarea que se repite, elige 2 o más personas en orden
   y la app reparte sola a quién le toca cada día (o cada día laborable, o cada semana).
   Un admin puede «pasar el turno al siguiente» si alguien no puede ese día.
