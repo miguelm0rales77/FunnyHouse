@@ -33,10 +33,12 @@ const SUBJECTS = ["Mates","Lengua","Inglés","Ciencias","Sociales","Música","Pl
 const IDEAS_CASA = ["Hacer la cama","Poner la mesa","Quitar la mesa","Sacar la basura","Poner el lavavajillas",
   "Recoger la habitación","Tender la ropa","Doblar la ropa","Pasear al perro","Regar las plantas","Aspirar","Limpiar el baño"];
 const IDEAS_EST = ["Hacer los deberes","Leer 20 minutos","Repasar para el examen","Preparar la mochila","Practicar inglés"];
-const IDEAS_PREMIO = [["📺","30 min más de pantalla",50],["🍕","Elegir la cena",80],["🎬","Peli en familia",100],
-  ["🛌","Acostarse 30 min más tarde",60],["💶","2 € de paga extra",120],["🎮","Tarde de videojuegos",150]];
+const IDEAS_PREMIO = [["🍕","Elegir la cena",60],["🏞️","Elegir el plan del finde",120],["🧁","Cocinar juntos un postre",80],
+  ["🎨","Tarde de manualidades",70],["🚲","Excursión en bici",100],["🎲","Noche de juegos de mesa",60],["🎬","Elegir la peli en familia",80],
+  ["📚","Un libro nuevo",150],["🛌","Desayuno en la cama",90],["📺","30 min más de pantalla",50],
+  ["💶","2 € de paga extra",120]];
 const AVATARS = ["🦊","🐼","🐯","🦁","🐸","🐵","🐨","🐰","🦄","🐙","🐧","🐶","🐱","🦖","🐝","🦉","🌟","⚽","🎸","🚀"];
-const REWARD_EMOJIS = ["🎁","📺","🎮","🍕","🍦","🎬","🛌","💶","🏞️","🧁","📚","🎨","⚽","🎢"];
+const REWARD_EMOJIS = ["🎁","🍕","🏞️","🧁","🎨","🚲","🎲","🎬","📚","🛌","🍦","⚽","🎢","📺","🎮","💶"];
 const COLORS = ["#E0663A","#3F7FD9","#8A4FD1","#2E9E6A","#D4A20F","#D9487A","#14949E","#7A8699"];
 
 const ICONS = {
@@ -59,7 +61,9 @@ let state = EMPTY();
 let outbox = [];
 let tab = "hoy";
 let meId = "";
-let loaded = !REMOTE;          // ya tenemos datos del servidor (o no hay servidor)
+let loaded = !REMOTE;          // hay algo que pintar (datos del servidor o copia guardada)
+let confirmed = !REMOTE;       // el servidor ha respondido bien al menos una vez en esta sesión
+let loadError = "";            // por qué no se ha podido cargar (si no hay copia guardada)
 let filters = { hoy:"", casa:"all", estudios:"all", premios:"" };
 let lastPainted = "";
 
@@ -68,11 +72,13 @@ const CACHE_KEY = NS + "cache." + HOME;
 const OUT_KEY   = NS + "outbox." + HOME;
 const ME_KEY    = NS + "me." + HOME;
 const PHOTO_KEY = NS + "photos." + HOME;
+const TOKEN_KEY = NS + "token." + HOME;
+/* Pase de sesión que da Supabase al entrar con el PIN (solo con servidor). */
+let token = "";
 /* Fotos de perfil: { idMiembro: { photo:"data:image/jpeg…", updated_at } }.
    Van aparte del resto del estado: la sincronización solo mira las fechas
    y descarga una foto únicamente cuando ha cambiado. */
 let photos = {};
-let photosOk = true;          // false si la tabla fh_photos todavía no existe
 function savePhotos(){ writeLS(PHOTO_KEY, photos); }
 
 function uid(){
@@ -141,7 +147,10 @@ function setStatus(s, text){
 
 function api(path, opts){
   opts = opts || {};
+  const ctrl = window.AbortController ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), 15000) : null;
   return fetch(BASE + "/rest/v1" + path, {
+    signal: ctrl ? ctrl.signal : undefined,
     method: opts.method || "GET",
     cache: "no-store",
     // Clave antigua (anon, empieza por eyJ…) va también como Bearer; la nueva
@@ -149,12 +158,28 @@ function api(path, opts){
     headers: Object.assign({ apikey: KEY, "Content-Type": "application/json" },
       /^eyJ/.test(KEY) ? { Authorization: "Bearer " + KEY } : {}, opts.headers || {}),
     body: opts.body
-  });
+  }).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+/* Llamada a una función segura de Supabase (security.sql). */
+async function rpc(fn, args){
+  const res = await api("/rpc/" + fn, { method:"POST", body: JSON.stringify(args || {}) });
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    let msg = text;
+    try { const j = JSON.parse(text); msg = j.message || j.error || text; } catch (e) {}
+    const err = new Error(msg || ("HTTP " + res.status));
+    err.status = res.status;
+    if (/^FH_AUTH/.test(msg)) err.auth = true;
+    const m = /^FH_OP:(\d+):([\s\S]*)$/.exec(msg || "");
+    if (m) { err.opIndex = Number(m[1]); err.reason = m[2]; }
+    throw err;
+  }
+  return text ? JSON.parse(text) : null;
 }
 
 function enqueue(job){
   if (!REMOTE) return;
-  job.tries = 0;
   outbox = outbox.filter((j) => !(j.table === job.table && j.key === job.key));
   outbox.push(job);
   saveOutbox();
@@ -163,56 +188,36 @@ function enqueue(job){
 let flushTimer = null, flushing = false;
 function scheduleFlush(){ clearTimeout(flushTimer); flushTimer = setTimeout(flush, 250); }
 
-async function runJob(job){
-  let res;
-  if (job.op === "upsert") {
-    res = await api("/" + job.table, {
-      method: "POST",
-      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify(job.row)
-    });
-  } else {
-    res = await api("/" + job.table + "?home=eq." + encodeURIComponent(HOME) + "&id=eq." + encodeURIComponent(job.key), {
-      method: "DELETE", headers: { Prefer: "return=minimal" }
-    });
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    const err = new Error("HTTP " + res.status + " " + body.slice(0,200));
-    err.status = res.status;
-    err.detail = job.table + " → " + errMsg(res.status, body);
-    throw err;
-  }
-}
-
+/* Envía la cola en lotes. Cada lote se guarda entero o no se guarda.
+   Si el servidor rechaza un cambio (no está permitido), se quita solo ese
+   y se reenvía el resto; después se recarga para ver la versión buena. */
 async function flush(){
-  if (!REMOTE || flushing || !outbox.length) return;
+  if (!REMOTE || flushing || !outbox.length || !token) return;
   if (!navigator.onLine) { setStatus("offline", "Sin conexión"); return; }
   flushing = true;
   setStatus("saving", "Guardando…");
   try {
     while (outbox.length) {
-      const job = outbox[0];
+      const batch = outbox.slice(0, 200);
       try {
-        await runJob(job);
-        outbox.shift(); saveOutbox();
+        await rpc("fh_apply", { p_token: token,
+          p_ops: batch.map((j) => ({ table:j.table, op:j.op, key:j.key, row:j.row || null })) });
+        outbox = outbox.filter((j) => !batch.includes(j)); saveOutbox();
       } catch (err) {
-        // 404 = Supabase no encuentra la tabla: NO se descarta el cambio,
-        // se queda en la cola y se reintenta hasta que la tabla exista.
-        if (err.status === 404) { bannerDetail = err.detail; showBanner("tables"); paintBanner(); throw err; }
-        job.tries = (job.tries || 0) + 1;
-        saveOutbox();
-        if (job.tries >= 4 || (err.status >= 400 && err.status < 500 && err.status !== 429)) {
-          outbox.shift(); saveOutbox();
-          bannerDetail = err.detail || ""; showBanner("rejected"); paintBanner();
+        if (err.auth) { sessionLost(); throw err; }
+        if (err.status === 404) { bannerDetail = err.message; showBanner("tables"); paintBanner(); throw err; }
+        if (err.opIndex !== undefined && batch[err.opIndex]) {
+          const bad = batch[err.opIndex];
+          outbox = outbox.filter((j) => j !== bad); saveOutbox();
+          bannerDetail = err.reason || ""; showBanner("rejected"); paintBanner();
           continue;
         }
-        throw err;
+        throw err;              // red u otro fallo: se reintenta más tarde
       }
     }
     setStatus("idle", "Guardado");
     hideBanner("offline");
-    refresh();
+    setTimeout(refresh, 0);        // al terminar de guardar, traer la versión del servidor
   } catch (e) {
     setStatus("offline", navigator.onLine ? "Sin guardar" : "Sin conexión");
     if (!navigator.onLine) showBanner("offline");
@@ -222,52 +227,47 @@ async function flush(){
 }
 
 async function refresh(){
-  if (!REMOTE || outbox.length || flushing || !navigator.onLine) return;
+  if (!REMOTE || flushing || !navigator.onLine || (token && outbox.length)) return;
   try {
-    const h = "?home=eq." + encodeURIComponent(HOME) + "&select=*";
-    const res = await Promise.all(KINDS.map((k) =>
-      api("/" + TABLES[k] + h + (k === "done" || k === "points" ? "&order=created_at.desc&limit=5000" : ""))));
-    const badI = res.findIndex((r) => !r.ok);
-    const bad = res[badI];
-    if (bad) {
-      if (bad.status === 404) {
-        bannerDetail = TABLES[KINDS[badI]] + " → " + errMsg(404, await bad.text().catch(() => ""));
-        showBanner("tables"); paintBanner(); loaded = true; afterLoad();
-      }
-      throw new Error("fetch " + bad.status);
-    }
-    const json = await Promise.all(res.map((r) => r.json()));
+    // Con sesión: toda la casa. Sin sesión: solo la lista de perfiles para elegir.
+    const data = token ? await rpc("fh_load", { p_token: token })
+                       : { members: await rpc("fh_who", { p_home: HOME }) };
     const next = EMPTY();
-    KINDS.forEach((k, i) => { next[k] = json[i]; });
+    KINDS.forEach((k) => { if (Array.isArray(data[k])) next[k] = data[k]; });
+    if (token && data.me && data.me !== meId) { meId = data.me; try { localStorage.setItem(ME_KEY, meId); } catch(e){} }
     const before = JSON.stringify(state);
     state = next;
     saveCache();
-    hideBanner("offline"); hideBanner("tables");
-    const first = !loaded;
-    loaded = true;
-    const photosChanged = await syncPhotos();
+    hideBanner("offline"); hideBanner("tables"); hideBanner("noconn");
+    const first = !confirmed;
+    loaded = true; confirmed = true; loadError = "";
+    const photosChanged = token ? await syncPhotos(data.photos || {}) : false;
     if (JSON.stringify(state) !== before || first || photosChanged) render();
     if (first) afterLoad();
   } catch (e) {
+    if (e.auth) { sessionLost(); return; }
     if (!navigator.onLine) { setStatus("offline", "Sin conexión"); showBanner("offline"); }
+    else if (e.status === 404) { bannerDetail = e.message; showBanner("tables"); paintBanner(); }
+    else {
+      bannerDetail = e.status ? e.message : (e.name === "AbortError" ? "La conexión tarda demasiado" : "Sin respuesta del servidor");
+      if (loaded) { showBanner("noconn"); paintBanner(); }   // sin copia guardada lo explica la pantalla
+    }
+    if (!loaded) {          // sin copia guardada: explicar en vez de quedarse «cargando»
+      loadError = e.status === 404 ? "tables" : (navigator.onLine ? "noconn" : "offline");
+      render();
+    }
   }
 }
 
-async function syncPhotos(){
+/* Fotos: el servidor manda solo { id: fecha }; se descargan las que cambiaron. */
+async function syncPhotos(remote){
   try {
-    const h = "?home=eq." + encodeURIComponent(HOME);
-    const r = await api("/fh_photos" + h + "&select=id,updated_at");
-    if (!r.ok) { photosOk = r.status !== 404; return false; }
-    photosOk = true;
-    const list = await r.json();
-    const remote = {};
-    list.forEach((x) => { remote[x.id] = x.updated_at; });
     let changed = false;
     Object.keys(photos).forEach((id) => { if (!(id in remote)) { delete photos[id]; changed = true; } });
-    const stale = list.filter((x) => !photos[x.id] || photos[x.id].updated_at !== x.updated_at).map((x) => x.id);
+    const stale = Object.keys(remote).filter((id) => !photos[id] || photos[id].updated_at !== remote[id]);
     if (stale.length) {
-      const r2 = await api("/fh_photos" + h + "&id=in.(" + stale.map((id) => '"' + id + '"').join(",") + ")&select=id,photo,updated_at");
-      if (r2.ok) (await r2.json()).forEach((x) => { photos[x.id] = { photo:x.photo, updated_at:x.updated_at }; changed = true; });
+      const list = await rpc("fh_photos_get", { p_token: token, p_ids: stale });
+      (list || []).forEach((x) => { photos[x.id] = { photo:x.photo, updated_at:x.updated_at }; changed = true; });
     }
     if (changed) savePhotos();
     return changed;
@@ -284,6 +284,30 @@ function setPhoto(id, dataUrl){
   }
   savePhotos();
 }
+
+/* --- sesión --- */
+function saveToken(){ try { localStorage.setItem(TOKEN_KEY, token); } catch(e){} }
+function setSession(tk, id){
+  token = tk || ""; saveToken();
+  setMe(id || "");
+  flush(); refresh();
+}
+function sessionLost(){
+  if (!token) return;
+  token = ""; saveToken();
+  meId = ""; try { localStorage.setItem(ME_KEY, ""); } catch(e){}
+  render();
+  toast("Tienes que volver a entrar con tu PIN");
+  refresh();
+}
+async function logout(){
+  const tk = token;
+  token = ""; saveToken();
+  setMe("");
+  if (REMOTE && tk) { try { await rpc("fh_logout", { p_token: tk }); } catch(e){} }
+  refresh();
+}
+const hasPin = (m) => !!(m && (m.has_pin || m.pin_hash));
 
 /* Recorta al centro, reduce a 192 px y comprime en JPEG (unos 10-20 KB). */
 function resizePhoto(file){
@@ -308,9 +332,11 @@ function resizePhoto(file){
 function put(kind, row, quiet){
   row = Object.assign({}, row, { home:HOME, updated_at:nowISO() });
   if (!row.created_at) row.created_at = row.updated_at;
+  const local = Object.assign({}, row);
+  if ("new_pin" in local) { if (local.new_pin) local.has_pin = true; delete local.new_pin; }
   const list = state[kind];
   const i = list.findIndex((x) => x.id === row.id);
-  if (i >= 0) list[i] = row; else list.unshift(row);
+  if (i >= 0) list[i] = local; else list.unshift(local);
   saveCache();
   enqueue({ table:TABLES[kind], op:"upsert", key:row.id, row });
   if (!quiet) render();
@@ -327,8 +353,9 @@ function drop(kind, id, quiet){
 /* --- avisos --- */
 const banners = {
   offline:'<strong>Sin conexión.</strong> Puedes seguir marcando tareas: se guardará solo en cuanto vuelvas a tener red.',
-  rejected:'<strong>Un cambio no se pudo guardar.</strong> Si se repite, revisa que las tablas de Supabase estén creadas.',
-  tables:'<strong>Supabase no encuentra una tabla de FunnyHouse.</strong> Revisa que <code>schema.sql</code> se ejecutó en este mismo proyecto. Tus cambios no se pierden: se guardarán solos cuando la tabla exista.',
+  rejected:'<strong>Un cambio no se ha guardado</strong> porque no está permitido. Ya se ha recargado la versión buena.',
+  noconn:'<strong>No se ha podido conectar con Supabase.</strong> Lo que ves es la última copia guardada en este móvil; lo que marques se guardará al reconectar. <button class="mini" type="button" data-retry>Reintentar</button>',
+  tables:'<strong>Falta preparar Supabase.</strong> Ejecuta <code>schema.sql</code> y después <code>security.sql</code> en el SQL Editor de este proyecto. Tus cambios no se pierden: se guardarán solos.',
   local:'<strong>Modo local.</strong> Los datos se guardan solo en este navegador. Pon <code>localOnly: false</code> en config.js para compartirlos con la familia.'
 };
 let activeBanner = null;
@@ -339,9 +366,11 @@ function errMsg(status, body){
 }
 function showBanner(k){ if (activeBanner === k) return; activeBanner = k; paintBanner(); }
 function hideBanner(k){ if (activeBanner === k) { activeBanner = null; paintBanner(); } }
+function retryNow(){ setStatus("saving", "Conectando…"); if (outbox.length) flush(); else refresh(); }
+document.getElementById("bannerSlot").addEventListener("click", (e) => { if (e.target.closest("[data-retry]")) retryNow(); });
 function paintBanner(){
-  const extra = (activeBanner === "tables" || activeBanner === "rejected") && bannerDetail
-    ? '<div class="banner-detail mono">' + esc(bannerDetail) + "<br>Proyecto: " + esc(BASE.replace(/^https:\/\//, "")) + "</div>" : "";
+  const extra = (activeBanner === "tables" || activeBanner === "rejected" || activeBanner === "noconn") && bannerDetail
+    ? '<div class="banner-detail mono">' + esc(bannerDetail) + (activeBanner === "rejected" ? "" : "<br>Proyecto: " + esc(BASE.replace(/^https:\/\//, ""))) + "</div>" : "";
   document.getElementById("bannerSlot").innerHTML = activeBanner ? '<div class="banner">' + banners[activeBanner] + extra + "</div>" : "";
 }
 
@@ -573,7 +602,15 @@ function render(){
   const who = document.getElementById("whoBtn");
   who.innerHTML = m ? av(m, "sm") + '<span class="nm">' + esc(m.name) + "</span>" + (m.role === "admin" ? '<span class="crown">★</span>' : "")
                     : '<span class="nm" style="padding-left:8px">¿Quién eres?</span>';
-  if (!loaded) { paint(emptyHTML('<span class="spinner">⏳</span>', "Cargando la casa…", "Un segundo.")); return; }
+  if (!loaded) {
+    const retry = '<br><br><button class="btn primary" type="button" data-act="retry">Reintentar</button>';
+    if (loadError === "tables") paint(emptyHTML("🧩", "Faltan tablas en Supabase", "Revisa el aviso de arriba." + retry));
+    else if (loadError === "offline") paint(emptyHTML("📡", "Sin conexión", "La primera vez hace falta internet para cargar la casa. Se reintentará solo." + retry));
+    else if (loadError) paint(emptyHTML("⚠️", "No se ha podido conectar", "No hay respuesta de la base de datos. Se reintentará solo cada pocos segundos." +
+      (bannerDetail ? '<br><span class="by mono">' + esc(bannerDetail) + " · " + esc(BASE.replace(/^https:\/\//, "")) + "</span>" : "") + retry));
+    else paint(emptyHTML("⏳", "Cargando la casa…", "Un segundo."));
+    return;
+  }
   if (tab === "hoy") renderHoy();
   else if (tab === "casa") renderList("casa");
   else if (tab === "estudios") renderList("estudio");
@@ -637,7 +674,8 @@ function claimHTML(c, adminView){
 function renderHoy(){
   const m = me();
   if (!m) {
-    paint(emptyHTML("👋", state.members.length ? "¿Quién eres?" : "Bienvenidos a FunnyHouse",
+    paint('<img class="welcome" src="img/bienvenida.webp" alt="Una familia feliz delante de una casa sonriente" width="520" height="520">' +
+      emptyHTML("👋", state.members.length ? "¿Quién eres?" : "Bienvenidos a FunnyHouse",
       state.members.length ? 'Elige tu perfil para ver tus tareas.<br><br><button class="btn primary" type="button" data-act="who">Elegir perfil</button>'
                            : 'Primero crea tu perfil de adulto: podrás añadir al resto de la familia después.<br><br><button class="btn primary" type="button" data-act="who">Empezar</button>'));
     return;
@@ -847,6 +885,7 @@ view.addEventListener("click", (e) => {
     case "reward": { const r = state.rewards.find((x) => x.id === id); if (r) openReward(r); break; }
     case "member": { const m = member(id); if (m) openMember(m); break; }
     case "who": openWho(); break;
+    case "retry": retryNow(); break;
   }
 });
 
@@ -1256,10 +1295,11 @@ function openMemberForm(m, firstRun){
   const d = editing ? Object.assign({}, editing) : {
     name:"", emoji: AVATARS[state.members.length % AVATARS.length],
     color: COLORS.find((c) => !usedColors.includes(c)) || COLORS[0],
-    role: firstRun ? "admin" : "member", pin_hash:null
+    role: firstRun ? "admin" : "member", has_pin:false
   };
   const lastAdmin = editing && editing.role === "admin" && admins().length <= 1;
   const html =
+    (firstRun ? '<img class="welcome sm" src="img/bienvenida.webp" alt="" width="520" height="520">' : "") +
     "<h2>" + (firstRun ? "Crea tu perfil" : editing ? (editing.id === meId ? "Tu perfil" : esc(editing.name)) : "Nuevo miembro") + "</h2>" +
     '<p class="sheet-note">' + (firstRun ? "Serás el primer admin de la casa. Luego podrás añadir al resto de la familia desde «Familia»." : "Cada uno elige su perfil en su móvil.") + "</p>" +
     '<div class="field"><label for="mName">Nombre</label><input id="mName" type="text" value="' + esc(d.name) + '" placeholder="' + (firstRun ? "Papá" : "Lucía") + '" autocomplete="off" maxlength="24"></div>' +
@@ -1279,10 +1319,10 @@ function openMemberForm(m, firstRun){
       '<button class="seg" type="button" data-v="member" aria-pressed="' + (d.role !== "admin") + '"' + (lastAdmin ? " disabled" : "") + ">Miembro</button>" +
       '<button class="seg" type="button" data-v="admin" aria-pressed="' + (d.role === "admin") + '">★ Admin</button></div>' +
       '<div class="help">' + (lastAdmin ? "Es el único admin: no se le pueden quitar los permisos." : "Admin: aprueba tareas, da puntos, crea premios y gestiona la familia.") + "</div></div>" : "") +
-    '<div class="field"><label for="mPin">PIN ' + (d.role === "admin" || firstRun ? "(obligatorio para admin)" : "(opcional)") + '</label>' +
-      '<input id="mPin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="new-password" placeholder="' + (d.pin_hash ? "••••  (dejar igual)" : "4 cifras") + '">' +
-      '<div class="help">Evita que otro elija tu perfil en su móvil. ' + (d.pin_hash ? "Deja el campo vacío para no cambiarlo." : "") + "</div>" +
-      (d.pin_hash && d.role !== "admin" ? '<button class="mini" type="button" id="mPinClear" style="margin-top:8px">Quitar PIN</button>' : "") + "</div>" +
+    '<div class="field"><label for="mPin">PIN' + (hasPin(d) ? " nuevo" : "") + '</label>' +
+      '<input id="mPin" class="pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="new-password" placeholder="' + (hasPin(d) ? "••••  (dejar igual)" : "4 a 8 cifras") + '">' +
+      '<div class="help">' + (hasPin(d) ? "Deja el campo vacío para no cambiarlo. Cambiarlo cierra la sesión en sus otros móviles."
+                                        : "Cada uno entra con su PIN. Apúntalo: sin él no se puede entrar.") + "</div></div>" +
     (admin && editing && !firstRun
       ? '<div class="field"><span class="lbl">Puntos extra o penalización</span><div class="row2"><div class="stepper"><button type="button" id="bMinus" aria-label="Menos">−</button>' +
           '<input id="bPts" type="number" step="5" value="10" inputmode="numeric"><button type="button" id="bPlus" aria-label="Más">+</button></div>' +
@@ -1316,9 +1356,6 @@ function openMemberForm(m, firstRun){
   pick("#mEmo .emo", "v", (v) => { d.emoji = v; paintPrev(); });
   pick("#mCol .col", "v", (v) => { d.color = v; paintPrev(); });
   pick("#mRole .seg", "v", (v) => { d.role = v; });
-  let clearPin = false;
-  const pc = $("#mPinClear");
-  if (pc) pc.addEventListener("click", () => { clearPin = true; pc.textContent = "PIN quitado (al guardar)"; pc.disabled = true; });
   const cancel = $("#mCancel"); if (cancel) cancel.addEventListener("click", closeSheet);
 
   if ($("#bGive")) {
@@ -1341,17 +1378,35 @@ function openMemberForm(m, firstRun){
     const pin = $("#mPin").value.trim();
     if (!name) { $("#mErr").textContent = "Escribe un nombre."; $("#mName").focus(); return; }
     if (pin && !/^\d{4,8}$/.test(pin)) { $("#mErr").textContent = "El PIN tiene que ser de 4 a 8 cifras."; return; }
-    if (d.role === "admin" && !pin && !(d.pin_hash && !clearPin)) { $("#mErr").textContent = "Un admin necesita PIN para que nadie más pueda usar su perfil."; $("#mPin").focus(); return; }
+    if (!pin && !hasPin(d)) { $("#mErr").textContent = "Pon un PIN de 4 a 8 cifras: hace falta para entrar."; $("#mPin").focus(); return; }
     if (state.members.some((x) => x.name.toLowerCase() === name.toLowerCase() && (!editing || x.id !== editing.id))) { $("#mErr").textContent = "Ya hay alguien con ese nombre."; return; }
     const row = {
       id: editing ? editing.id : uid(), name, emoji:d.emoji, color:d.color,
       role: admin ? d.role : (editing ? editing.role : "member"),
-      pin_hash: pin ? await hashPin(pin) : (clearPin ? null : (d.pin_hash || null)),
       created_at: editing ? editing.created_at : undefined
     };
-    if (admin && newPhoto !== undefined) setPhoto(row.id, newPhoto);
+    // Con servidor, el PIN viaja tal cual y Supabase lo cifra; en modo local se cifra aquí.
+    if (REMOTE) { if (pin) row.new_pin = pin; }
+    else row.pin_hash = pin ? await hashPin(pin) : (d.pin_hash || null);
+
+    if (firstRun && REMOTE) {
+      const btn = $("#mSave"); btn.disabled = true; btn.textContent = "Creando…";
+      try {
+        const r = await rpc("fh_bootstrap", { p_home: HOME, p_member: { id:row.id, name, emoji:d.emoji, color:d.color }, p_pin: pin });
+        if (!r || r.error) throw new Error(r ? r.error : "Sin respuesta");
+        state.members = [Object.assign({}, row, { home:HOME, role:"admin", has_pin:true })];
+        delete state.members[0].new_pin;
+        setSession(r.token, r.member);
+        if (newPhoto) setPhoto(row.id, newPhoto);
+        closeSheet(); toast("¡Bienvenido a FunnyHouse!"); tab = "familia"; render();
+      } catch (e) {
+        btn.disabled = false; btn.textContent = "Empezar";
+        $("#mErr").textContent = e.message && !/^HTTP|Failed|NetworkError|abort/i.test(e.message) ? e.message : "No se ha podido conectar. Inténtalo otra vez.";
+      }
+      return;
+    }
     put("members", row);
-    if (newPhoto && REMOTE && !photosOk) toast("Falta la tabla de fotos: ejecuta schema.sql");
+    if (admin && newPhoto !== undefined) setPhoto(row.id, newPhoto);
     if (firstRun) { setMe(row.id); closeSheet(); toast("¡Bienvenido a FunnyHouse!"); tab = "familia"; render(); return; }
     closeSheet(); toast(editing ? "Guardado" : name + " ya es de la familia");
   });
@@ -1367,23 +1422,33 @@ function setMe(id){
 }
 
 function openWho(){
-  if (!state.members.length) { openMemberForm(null, true); return; }
+  if (!state.members.length) {
+    if (confirmed) { openMemberForm(null, true); return; }
+    openSheet("<h2>Todavía no hemos cargado la familia</h2>" +
+      '<p class="sheet-note">Para no crear una casa nueva por error, espera a que la app conecte con la base de datos.</p>' +
+      '<div class="btn-stack"><button class="btn primary" type="button" id="wRetry">Reintentar</button><button class="btn ghost" type="button" id="wClose">Cerrar</button></div>');
+    $("#wRetry").addEventListener("click", () => { closeSheet(); retryNow(); });
+    $("#wClose").addEventListener("click", closeSheet);
+    return;
+  }
   const ms = sortedMembers();
   openSheet(
     "<h2>¿Quién eres?</h2>" +
-    '<p class="sheet-note">Se recuerda en este dispositivo. Los perfiles con 🔒 piden PIN.</p>' +
+    '<p class="sheet-note">' + (REMOTE ? "Toca tu perfil y escribe tu PIN. Este móvil lo recordará." : "Se recuerda en este dispositivo. Los perfiles con 🔒 piden PIN.") + "</p>" +
     '<div class="whos">' + ms.map((m) =>
       '<button type="button" data-id="' + esc(m.id) + '" aria-pressed="' + (m.id === meId) + '">' + av(m, "lg") + esc(m.name) +
-      '<span class="lock">' + (m.role === "admin" ? "★ Admin " : "") + (m.pin_hash ? "🔒" : "") + "</span></button>").join("") + "</div>" +
+      '<span class="lock">' + (m.role === "admin" ? "★ Admin " : "") + (hasPin(m) ? "🔒" : "") + "</span></button>").join("") + "</div>" +
     '<div class="btn-stack">' + (meId ? '<button class="btn ghost" type="button" id="wOut">Salir (no elegir a nadie)</button>' : "") + "</div>"
   );
   $$(".whos button").forEach((b) => b.addEventListener("click", () => {
     const m = member(b.dataset.id); if (!m) return;
     if (m.id === meId) { closeSheet(); return; }
-    if (m.pin_hash) openPin(m, () => { setMe(m.id); closeSheet(); toast("Hola, " + m.name); });
-    else { setMe(m.id); closeSheet(); toast("Hola, " + m.name); }
+    const hello = () => { closeSheet(); toast("Hola, " + m.name); };
+    if (REMOTE) openPin(m, hello);                       // con servidor, siempre con PIN
+    else if (hasPin(m)) openPin(m, () => { setMe(m.id); hello(); });
+    else { setMe(m.id); hello(); }
   }));
-  const out = $("#wOut"); if (out) out.addEventListener("click", () => { setMe(""); closeSheet(); });
+  const out = $("#wOut"); if (out) out.addEventListener("click", () => { closeSheet(); logout(); });
 }
 
 function openPin(m, onOk){
@@ -1394,11 +1459,25 @@ function openPin(m, onOk){
     '<p class="err" id="pErr" style="text-align:center"></p>' +
     '<div class="btn-stack"><button class="btn primary" type="button" id="pGo">Entrar</button><button class="btn ghost" type="button" id="pBack">Volver</button></div>'
   );
+  const fail = (msg) => { $("#pErr").textContent = msg; $("#pIn").value = ""; $("#pIn").focus(); };
+  if (REMOTE && !hasPin(m)) {
+    $("#pIn").disabled = true; $("#pGo").disabled = true;
+    $("#pErr").textContent = "Este perfil aún no tiene PIN. Pide a un adulto que te lo ponga en «Familia».";
+  }
   const go = async () => {
     const v = $("#pIn").value.trim();
     if (!v) return;
-    if (await hashPin(v) === m.pin_hash) onOk();
-    else { $("#pErr").textContent = "PIN incorrecto"; $("#pIn").value = ""; $("#pIn").focus(); }
+    if (!REMOTE) { if (await hashPin(v) === m.pin_hash) onOk(); else fail("PIN incorrecto"); return; }
+    const btn = $("#pGo"); btn.disabled = true; btn.textContent = "Comprobando…";
+    try {
+      const r = await rpc("fh_login", { p_home: HOME, p_member: m.id, p_pin: v });
+      if (!r || r.error) { btn.disabled = false; btn.textContent = "Entrar"; fail(r ? r.error : "Sin respuesta"); return; }
+      setSession(r.token, r.member);
+      onOk();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = "Entrar";
+      fail(navigator.onLine ? "No se ha podido conectar. Inténtalo otra vez." : "Sin conexión: hace falta internet para entrar.");
+    }
   };
   $("#pGo").addEventListener("click", go);
   $("#pIn").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
@@ -1411,6 +1490,7 @@ function openPin(m, onOk){
    --------------------------------------------------------------- */
 function afterLoad(){
   if (me() || sheet.open) return;
+  if (!state.members.length && !confirmed) return;
   if (meId && !me()) meId = "";            // ese perfil se borró
   setTimeout(() => { if (!me() && !sheet.open) openWho(); }, 300);
 }
@@ -1422,6 +1502,8 @@ function start(){
   outbox = readLS(OUT_KEY, []) || [];
   photos = readLS(PHOTO_KEY, {}) || {};
   try { meId = localStorage.getItem(ME_KEY) || ""; } catch(e){}
+  try { token = localStorage.getItem(TOKEN_KEY) || ""; } catch(e){}
+  if (REMOTE && !token) meId = "";           // con servidor, sin pase no hay perfil elegido
   try { const t = sessionStorage.getItem("funnyhouse.tab"); if (TABS.some((x) => x.id === t)) tab = t; } catch(e){}
   if (state.members.length) loaded = true;   // con caché se puede pintar ya
 

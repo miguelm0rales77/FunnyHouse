@@ -2,7 +2,7 @@
    Guarda la app en el móvil para que abra al instante y funcione sin cobertura.
    Los datos NUNCA se cachean aquí: eso lo gestiona la propia app. */
 
-const VERSION = "funnyhouse-v2";
+const VERSION = "funnyhouse-v4";
 const SHELL = [
   "./",
   "./index.html",
@@ -11,7 +11,8 @@ const SHELL = [
   "./manifest.webmanifest",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
-  "./icons/apple-touch-icon.png"
+  "./icons/apple-touch-icon.png",
+  "./img/bienvenida.webp"
 ];
 const FONT_CACHE = VERSION + "-fonts";
 

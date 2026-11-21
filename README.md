@@ -1,7 +1,7 @@
 # FunnyHouse
 
 Las tareas de casa, los estudios y los premios de toda la familia.
-Web app instalable, hermana de Despensar: mismo funcionamiento, misma base de datos.
+Web app instalable, hermana de Despensar. Cada miembro entra con su perfil y su PIN.
 
 ## Qué hace
 
@@ -22,7 +22,7 @@ Web app instalable, hermana de Despensar: mismo funcionamiento, misma base de da
 
 | | Admin (padres) | Miembro (hijos) |
 |---|---|---|
-| Ver todo | ✔ | ✔ |
+| Ver la casa (después de entrar con su PIN) | ✔ | ✔ |
 | Marcar sus tareas y las de «cualquiera» | ✔ (y las de todos) | ✔ |
 | Apuntar tareas y deberes **para sí mismo** | ✔ | ✔ (sin puntos) |
 | Asignar tareas a otros y poner puntos | ✔ | — |
@@ -37,10 +37,11 @@ Se puede desactivar la revisión en cada tarea («Un adulto la aprueba»).
 
 ## Puesta en marcha
 
-1. **Crear las tablas**: en Supabase → *SQL Editor* → *New query*, pega `schema.sql` y pulsa *Run*.
-   Usa el mismo proyecto que Despensar; las tablas llevan el prefijo `fh_`.
+1. **Preparar Supabase**: en el proyecto de `config.js` → *SQL Editor* → *New query*,
+   pega `schema.sql` y pulsa *Run*. Después, en otra consulta, `security.sql` y *Run*.
+   Los dos se pueden volver a ejecutar sin perder nada.
 2. **Publicar**: igual que Despensar. Repositorio nuevo en GitHub (p. ej. `funnyhouse`),
-   sube todos los archivos respetando la carpeta `icons/`, y en Settings → Pages
+   sube todos los archivos respetando las carpetas `icons/` e `img/`, y en Settings → Pages
    elige la rama `main`, carpeta `/ (root)`.
 3. Abre la web: lo primero que pide es crear el perfil del primer admin (con PIN).
    Después, en **Familia → Añadir miembro**, das de alta al resto.
@@ -55,15 +56,24 @@ index.html               interfaz y estilos
 app.js                   la lógica
 config.js                Supabase, identificador de la casa, enlace a Despensar
 schema.sql               las tablas de Supabase
+security.sql             PIN, permisos y guardado seguro (funciones del servidor)
 sw.js                    abre al instante y funciona sin conexión
 manifest.webmanifest     para instalarla como app
 icons/                   iconos
+img/                     ilustración de bienvenida
 ```
 
-## Aviso honesto sobre seguridad
+## Seguridad
 
-Igual que Despensar, no hay cuentas: quien tenga la dirección puede abrir la app.
-Los permisos y el PIN se comprueban **en la propia app**, lo que basta para el día a día
-en familia, pero alguien con conocimientos técnicos podría saltárselos llamando a la base
-de datos directamente. Si algún día hace falta blindarlo, el camino es activar
-autenticación en Supabase y mover las acciones de admin a funciones del servidor.
+- **Nadie lee ni escribe la base de datos directamente.** La clave pública de `config.js`
+  solo puede llamar a unas pocas funciones de `security.sql`.
+- **El PIN se comprueba en Supabase**, se guarda cifrado (bcrypt) y nunca sale del servidor.
+  Tras 5 intentos fallidos, ese perfil se bloquea 10 minutos.
+- Al entrar, el móvil recibe un **pase de sesión**. Cambiar el PIN de alguien cierra sus
+  sesiones en los otros móviles; «Salir» cierra la del móvil actual.
+- **Cada cambio se comprueba en el servidor** con las reglas de la tabla de arriba
+  (solo un admin aprueba, da puntos, crea premios, cambia fotos…), y se guarda en lotes
+  que se aplican enteros o no se aplican.
+- Todos los miembros necesitan PIN. Lo que queda abierto: con la dirección y el
+  identificador de la casa se ven los nombres y dibujos de los perfiles (no las fotos
+  ni las tareas), para poder elegir quién eres.
