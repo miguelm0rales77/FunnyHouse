@@ -16,7 +16,7 @@ const HOME = String(CFG.home || "casa").trim();
 const FORCE_LOCAL = /[?&]local=1\b/.test(location.search);   // ?local=1 → probar sin tocar los datos reales
 const REMOTE = !CFG.localOnly && !FORCE_LOCAL && /^https:\/\/.+\.supabase\.(co|in)$/i.test(BASE) && KEY.length > 30;
 const DESPENSAR = String(CFG.despensarUrl || "").trim();
-const APP_VERSION = "7";       // súbelo junto con VERSION de sw.js en cada cambio
+const APP_VERSION = "8";       // súbelo junto con VERSION de sw.js en cada cambio
 
 /* ---------------------------------------------------------------
    1. Constantes
@@ -403,6 +403,24 @@ function periodOf(t, d){
    Hay una fila hecha por persona: id = tarea|periodo|persona. */
 function teamOf(t){ return t.team ? String(t.team).split(",").map((x) => x.trim()).filter((id) => member(id)) : []; }
 const isTeam = (t) => teamOf(t).length > 0;
+/* --- tareas «en equipo» ---
+   t.crew = "id1,id2": la hacen JUNTOS (una sola vez) y cada uno se lleva los puntos.
+   Hay una fila hecha (tarea|periodo) y un apunte de puntos por persona: d|hecha|persona. */
+function crewOf(t){ return !t.team && t.crew ? String(t.crew).split(",").map((x) => x.trim()).filter((id) => member(id)) : []; }
+const isCrew = (t) => crewOf(t).length > 1;
+const namesOf = (ids) => { const n = ids.map((id) => member(id).name); return n.length > 1 ? n.slice(0, -1).join(", ") + " y " + n[n.length - 1] : n.join(""); };
+/* Da (on) o quita los puntos de una vez hecha: a quien la hizo o, si es en equipo, a cada uno. */
+function payPoints(t, dn, on){
+  const crew = t ? crewOf(t) : [];
+  const many = crew.length > 1;
+  drop("points", "d|" + dn.id, true);
+  crew.forEach((mid) => drop("points", "d|" + dn.id + "|" + mid, true));
+  if (!on || !Number(dn.points)) return;
+  (many ? crew : [dn.member_id]).forEach((mid) => put("points", {
+    id: "d|" + dn.id + (many ? "|" + mid : ""), member_id: mid, delta: Number(dn.points),
+    reason: t ? t.title + (many ? " (en equipo)" : "") : "Tarea", given_by: meId
+  }, true));
+}
 let ctxMember = "";     // persona desde cuya vista se está pintando (Hoy de X, filtro de la lista…)
 const doneId = (t, period, mid) => t.id + "|" + period + (isTeam(t) ? "|" + mid : "");
 /* En una tarea de «todos», de quién hablamos: la persona de la vista si está en el equipo,
@@ -469,6 +487,7 @@ function nextTurns(t, count){
 function forMember(t, id, anyTurn){
   if (id === "all") return true;
   if (isTeam(t)) return teamOf(t).includes(id);
+  if (isCrew(t)) return crewOf(t).includes(id);
   if (anyTurn && rotationOf(t).includes(id)) return true;
   const a = assigneeOn(t);
   return !a || a === id;
@@ -479,6 +498,7 @@ function canMark(t){
   const m = me(); if (!m) return false;
   if (m.role === "admin") return true;
   if (isTeam(t)) return teamOf(t).includes(m.id);
+  if (isCrew(t)) return crewOf(t).includes(m.id);
   const a = assigneeOn(t); return !a || a === m.id;
 }
 /* Un miembro solo puede editar lo que él mismo creó y aún no está aprobado. */
@@ -494,7 +514,10 @@ function weekStats(id){
   const from = mondayOf(today0()).getTime();
   let n = 0, pts = 0;
   state.done.forEach((d) => {
-    if (d.member_id === id && d.status === "ok" && new Date(d.created_at).getTime() >= from) { n++; pts += Number(d.points) || 0; }
+    if (d.status !== "ok" || new Date(d.created_at).getTime() < from) return;
+    const t = state.tasks.find((x) => x.id === d.task_id);
+    const who = t && isCrew(t) ? crewOf(t) : [d.member_id];
+    if (who.includes(id)) { n++; pts += Number(d.points) || 0; }
   });
   return { n, pts };
 }
@@ -511,14 +534,17 @@ function tick(t, creditTo){
     who = creditTo || (isAdmin() ? subjectOf(t) : (teamOf(t).includes(m.id) ? m.id : null));
     if (!who) { openTask(t); return; }          // vista de conjunto: elegir a quién
   } else {
-    who = creditTo || (isAdmin() && assigneeOn(t) ? assigneeOn(t) : m.id);
+    const crew = crewOf(t);
+    who = creditTo || (crew.length > 1
+      ? (crew.includes(m.id) ? m.id : crew.includes(ctxMember) ? ctxMember : crew[0])
+      : (isAdmin() && assigneeOn(t) ? assigneeOn(t) : m.id));
   }
   const id = doneId(t, period, who);
   const ex = state.done.find((x) => x.id === id);
 
   if (ex && ex.status !== "no" && !creditTo) {
     if (ex.status === "pending" && (ex.member_id === meId || isAdmin())) { drop("done", id); toast("Desmarcada"); return; }
-    if (ex.status === "ok" && isAdmin()) { drop("points", "d|" + id, true); drop("done", id); toast("Desmarcada y puntos devueltos"); return; }
+    if (ex.status === "ok" && isAdmin()) { payPoints(t, ex, false); drop("done", id); toast("Desmarcada y puntos devueltos"); return; }
     toast(ex.status === "ok" ? "Ya está aprobada ✔" : "Esperando revisión");
     return;
   }
@@ -527,21 +553,19 @@ function tick(t, creditTo){
   const row = { id, task_id:t.id, member_id:who, period, status: auto ? "ok" : "pending",
     points:pts, reviewed_by: auto ? meId : null, created_at:nowISO() };
   put("done", row, true);
-  if (auto && pts) put("points", { id:"d|" + id, member_id:who, delta:pts, reason:t.title, given_by:meId }, true);
-  else drop("points", "d|" + id, true);
+  payPoints(t, row, auto);
   render();
-  if (auto) celebrate(pts ? "+" + pts + " ⭐" : "¡Hecho!");
+  if (auto) celebrate(pts ? "+" + pts + " ⭐" + (isCrew(t) ? " cada uno" : "") : "¡Hecho!");
   else toast("¡Bien! Ahora la revisa un adulto");
 }
 
 function review(d, ok){
   const t = state.tasks.find((x) => x.id === d.task_id);
   put("done", Object.assign({}, d, { status: ok ? "ok" : "no", reviewed_by:meId }), true);
-  if (ok && Number(d.points)) put("points", { id:"d|" + d.id, member_id:d.member_id, delta:Number(d.points),
-    reason: t ? t.title : "Tarea", given_by:meId }, true);
-  else drop("points", "d|" + d.id, true);
+  payPoints(t, d, ok);
   render();
-  toast(ok ? "Aprobada" + (Number(d.points) ? " · +" + d.points + " ⭐" : "") : "Rechazada: tendrá que repetirla");
+  const each = t && isCrew(t) ? " cada uno (" + namesOf(crewOf(t)) + ")" : "";
+  toast(ok ? "Aprobada" + (Number(d.points) ? " · +" + d.points + " ⭐" + each : "") : "Rechazada: tendrá que repetirla");
 }
 
 function decideClaim(c, ok){
@@ -611,13 +635,15 @@ function taskHTML(t, opts){
     const tp = teamProgress(t);
     pills.push('<span class="pill team">👨‍👩‍👧 Todos' + (subj ? "" : " · " + tp.ok + "/" + tp.tm.length) + "</span>");
   }
+  const crew = crewOf(t), many = crew.length > 1;
+  if (many) pills.push('<span class="pill team">🤝 Juntos</span>');
   if (t.kind === "estudio") pills.push('<span class="pill est">' + esc([STUDY[t.study_type] || "Estudio", t.subject].filter(Boolean).join(" · ")) + "</span>");
   if (t.freq && t.freq !== "none") pills.push('<span class="pill">' + FREQ[t.freq] + "</span>");
   if (rotationOf(t).length) pills.push('<span class="pill turn">🔁 Turnos</span>');
   if (t.due && st !== "ok") { const di = dueInfo(t.due, exam); if (di) pills.push('<span class="pill ' + di.cls + '">' + esc(di.label) + "</span>"); }
   if (st === "pending") pills.push('<span class="pill pending">Por revisar</span>');
   if (st === "no") pills.push('<span class="pill no">Rechazada · repítela</span>');
-  if (!team && d && st !== "no" && d.member_id && d.member_id !== assigneeOn(t)) {
+  if (!team && !many && d && st !== "no" && d.member_id && d.member_id !== assigneeOn(t)) {
     const who = member(d.member_id);
     if (who) pills.push('<span class="by">hecha por ' + esc(who.name) + "</span>");
   }
@@ -633,7 +659,9 @@ function taskHTML(t, opts){
       (pills.length ? '<span class="sub">' + pills.join("") + "</span>" : "") +
     "</button>" +
     (Number(t.points) ? '<span class="pts">+' + Number(t.points) + "</span>" : "") +
-    (opts.noAvatar ? "" : team ? '<span class="av any sm" title="Todos">👨‍👩‍👧</span>' : av(member(assigneeOn(t)), "sm")) +
+    (opts.noAvatar ? "" : team ? '<span class="av any sm" title="Todos">👨‍👩‍👧</span>'
+      : many ? '<span class="avs" title="' + esc(namesOf(crew)) + '">' + crew.map((id) => av(member(id), "sm")).join("") + "</span>"
+      : av(member(assigneeOn(t)), "sm")) +
     "</div>";
 }
 const listHTML = (arr, opts) => '<div class="list">' + arr.map((t) => taskHTML(t, opts)).join("") + "</div>";
@@ -743,7 +771,7 @@ function renderHoy(){
     const st = statusOf(t);
     // una tarea de «cualquiera» que ya hizo otra persona deja de ser de este día
     const dn0 = doneFor(t);
-    if (!isTeam(t) && !assigneeOn(t) && dn0 && dn0.status !== "no" && dn0.member_id !== fid) return;
+    if (!isTeam(t) && !isCrew(t) && !assigneeOn(t) && dn0 && dn0.status !== "no" && dn0.member_id !== fid) return;
     if (isExam(t)) {
       const n = daysUntil(t.due);
       if (st !== "ok" && n !== null && n >= 0 && n <= 14) exams.push(t);
@@ -870,6 +898,27 @@ function renderPremios(){
 
   const fid = member(filters.premios) ? filters.premios : meId;
   if (member(fid)) {
+    const mine = state.points.filter((p) => p.member_id === fid);
+    const sum = (f) => mine.filter(f).reduce((s, p) => s + (Number(p.delta) || 0), 0);
+    const won = sum((p) => Number(p.delta) > 0);
+    const spent = -sum((p) => Number(p.delta) < 0 && String(p.id).startsWith("c|"));
+    const other = -sum((p) => Number(p.delta) < 0 && !String(p.id).startsWith("c|"));
+    const resv = reserved(fid);
+    html += secHTML("Cuenta de " + esc(member(fid).name), "");
+    html += '<div class="acct"><div><span>Ganados</span><b class="plus">+' + won + "</b></div>" +
+      '<div><span>Canjeados</span><b class="minus">−' + spent + "</b></div>" +
+      (other ? '<div><span>Quitados</span><b class="minus">−' + other + "</b></div>" : "") +
+      '<div class="tot"><span>Le quedan</span><b>' + balance(fid) + " ⭐</b></div></div>" +
+      (resv ? '<p class="by" style="margin:6px 2px 0">' + resv + " ⭐ están reservados en premios pedidos que aún no ha aprobado un adulto.</p>" : "");
+    const got = state.claims.filter((c) => c.member_id === fid && c.status === "ok")
+      .sort((a, b) => String(b.updated_at || b.created_at).localeCompare(String(a.updated_at || a.created_at)));
+    html += secHTML("Premios canjeados", got.length || "");
+    html += got.length ? '<div class="ledger">' + got.map((c) => {
+      const r = state.rewards.find((x) => x.id === c.reward_id);
+      return '<div class="lrow"><span class="r">' + esc((r && r.emoji ? r.emoji + " " : "🎁 ") + (c.title || "Premio")) + '<div class="d">' + esc(whenLabel(c.updated_at || c.created_at)) +
+        (member(c.reviewed_by) ? " · lo dio " + esc(member(c.reviewed_by).name) : "") + "</div></span>" +
+        '<span class="v minus">−' + Math.abs(Number(c.cost) || 0) + "</span></div>";
+    }).join("") + "</div>" : '<p class="by" style="margin:4px 2px 0">Todavía no ha canjeado ningún premio.</p>';
     const rows = state.points.filter((p) => p.member_id === fid)
       .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, 25);
     html += secHTML("Movimientos de " + esc(member(fid).name), "");
@@ -955,6 +1004,7 @@ view.addEventListener("click", (e) => {
 function explainLocked(t){
   if (isTeam(t) && !teamOf(t).includes(meId)) { toast("Esta la tiene que hacer cada uno: no estás en la lista"); return; }
   if (isTeam(t) && subjectOf(t) !== meId) { toast("Cada uno marca la suya"); return; }
+  if (isCrew(t) && !crewOf(t).includes(meId)) { toast("Esta tarea es de " + namesOf(crewOf(t))); return; }
   const st = statusOf(t);
   if (st === "ok") toast("Ya está aprobada ✔");
   else if (st === "pending") toast("Esperando revisión");
@@ -1068,7 +1118,8 @@ function openTask(t){
                                   : '<span class="pill casa">Casa</span>');
   pills.push('<span class="pill">' + FREQ[t.freq || "none"] + "</span>");
   if (t.due) { const di = dueInfo(t.due, exam); pills.push('<span class="pill ' + (st === "ok" ? "" : di.cls) + '">' + esc(di.label) + " · " + shortDate(t.due) + "</span>"); }
-  if (Number(t.points)) pills.push('<span class="pill gold">+' + Number(t.points) + " ⭐</span>");
+  const crew = crewOf(t), many = crew.length > 1;
+  if (Number(t.points)) pills.push('<span class="pill gold">+' + Number(t.points) + " ⭐" + (many ? " cada uno" : "") + "</span>");
   if (!t.needs_ok) pills.push('<span class="pill">Sin revisión</span>');
 
   const period = t.freq === "daily" || t.freq === "weekdays" ? "hoy" : t.freq === "weekly" ? "esta semana" : "";
@@ -1089,11 +1140,13 @@ function openTask(t){
         '<div class="help">Orden: ' + rot.map((id) => esc(member(id).name)).join(" → ") + ".</div>" +
         (isAdmin() ? '<button class="mini" type="button" id="tSkip" style="margin-top:8px">Pasar el turno al siguiente</button>' : "") + "</div>"
       : team ? teamDetailHTML(t)
+      : many ? '<div class="field"><span class="lbl">La hacen juntos</span><div class="sub" style="margin:0">' +
+          crew.map((id) => av(member(id), "sm")).join("") + " " + esc(namesOf(crew)) + '</div><div class="help">Cuando esté hecha, cada uno gana sus puntos.</div></div>'
       : '<div class="field"><span class="lbl">Para</span><div class="sub" style="margin:0">' + av(asg, "sm") + " " + esc(asg ? asg.name : "Cualquiera") + "</div></div>") +
     (team && !subj ? "" : '<div class="field"><span class="lbl">' + (team ? "La tuya" : "Estado") + '</span><div class="sub" style="margin:0">' + stTxt + "</div></div>") +
     (t.notes ? '<div class="notes">' + esc(t.notes) + "</div>" : "");
 
-  if (exam && (isAdmin() || t.created_by === meId || assigneeOn(t) === meId)) {
+  if (exam && (isAdmin() || t.created_by === meId || assigneeOn(t) === meId || crew.includes(meId))) {
     html += '<div class="field"><label for="tGrade">Nota del examen</label><div class="row2"><input id="tGrade" type="text" inputmode="decimal" value="' + esc(t.grade || "") + '" placeholder="Ej. 8,5">' +
       '<button class="btn ghost" type="button" id="tGradeSave">Guardar nota</button></div></div>';
   }
@@ -1112,7 +1165,7 @@ function openTask(t){
     if (st === "todo" || st === "no") html += '<button class="btn good" type="button" id="tTick">' + ICONS.check + " Marcar como hecha</button>";
     else if ((st === "pending" && d.member_id === meId) || (st === "ok" && isAdmin())) html += '<button class="btn ghost" type="button" id="tTick">Desmarcar</button>';
   }
-  if (!team && isAdmin() && (st === "todo" || st === "no") && state.members.length > 1) {
+  if (!team && !many && isAdmin() && (st === "todo" || st === "no") && state.members.length > 1) {
     html += '<div class="field" style="margin:6px 0 0"><span class="lbl">La ha hecho…</span>' + memberChips("tCredit", "", false) +
       '<div class="help">Márcala como hecha y aprobada a nombre de otra persona.</div></div>';
   }
@@ -1207,6 +1260,7 @@ function openTaskForm(opts){
   const favOf = (title) => (state.favs || []).find((f) => (f.title || "").trim().toLowerCase() === (title || "").trim().toLowerCase());
   d.rot = editing ? rotationOf(editing) : [];
   d.isTeam = editing ? isTeam(editing) : false;
+  d.sel = editing && isCrew(editing) ? crewOf(editing) : (d.assignee && !d.isTeam ? [d.assignee] : []);
   d.teamSel = editing && isTeam(editing) ? teamOf(editing)
     : (state.members.filter((m) => m.role !== "admin").map((m) => m.id));
   if (!d.teamSel.length) d.teamSel = state.members.map((m) => m.id);
@@ -1280,12 +1334,26 @@ function openTaskForm(opts){
   const whoHelp = () => {
     const h = $("#fWhoHelp"); if (!h) return;
     h.textContent = d.isTeam ? "Cada persona tiene que hacer la suya, y cada una gana sus puntos."
-                  : !d.assignee ? "La hace uno, el primero que pueda." : "";
+                  : d.sel.length > 1 ? "La hacen juntos " + namesOf(sortedMembers().map((m) => m.id).filter((id) => d.sel.includes(id))) + ": se marca una vez y cada uno gana sus puntos."
+                  : !d.sel.length ? "La hace uno, el primero que pueda. Toca varias personas si la hacen juntas."
+                  : "Toca a otra persona más si la hacen juntas.";
   };
-  pick("#fWho .chip", "m", (v) => {
-    d.isTeam = v === "__all"; d.assignee = d.isTeam ? "" : v;
-    $("#fTeamWrap").hidden = !d.isTeam; whoHelp(); paintRot();
+  const paintWho = () => $$("#fWho .chip").forEach((b) => {
+    const v = b.dataset.m;
+    b.setAttribute("aria-pressed", String(v === "__all" ? d.isTeam : v === "" ? !d.isTeam && !d.sel.length : !d.isTeam && d.sel.includes(v)));
   });
+  $$("#fWho .chip").forEach((b) => b.addEventListener("click", () => {
+    const v = b.dataset.m;
+    if (v === "__all") { d.isTeam = true; d.sel = []; }
+    else if (v === "") { d.isTeam = false; d.sel = []; }
+    else {
+      if (d.isTeam) { d.isTeam = false; d.sel = []; }
+      const i = d.sel.indexOf(v); if (i >= 0) d.sel.splice(i, 1); else d.sel.push(v);
+    }
+    d.assignee = d.sel.length === 1 ? d.sel[0] : "";
+    $("#fTeamWrap").hidden = !d.isTeam; paintWho(); whoHelp(); paintRot();
+  }));
+  if (admin) paintWho();
   $$("#fTeam .chip").forEach((b) => b.addEventListener("click", () => {
     const id = b.dataset.m, i = d.teamSel.indexOf(id);
     if (i >= 0) d.teamSel.splice(i, 1); else d.teamSel.push(id);
@@ -1333,15 +1401,18 @@ function openTaskForm(opts){
                           : (admin ? null : (editing ? editing.team || null : null));
     const prevRot = editing ? (editing.rotation || null) : null;
     const rotation = team ? null : admin ? (d.freq !== "none" && d.rot.length >= 2 ? d.rot.join(",") : null) : prevRot;
+    const crew = team || rotation ? null
+      : admin ? (d.sel.length > 1 ? sortedMembers().map((m) => m.id).filter((id) => d.sel.includes(id)).join(",") : null)
+      : (editing ? editing.crew || null : null);
     const rot_start = !rotation ? null
       : (editing && editing.rot_start && prevRot === rotation && editing.freq === d.freq) ? editing.rot_start : toISO(today0());
     const row = {
       id: editing ? editing.id : uid(),
-      rotation, rot_start, team,
+      rotation, rot_start, team, crew,
       title, kind:d.kind,
       study_type: d.kind === "estudio" ? (d.study_type || "deberes") : null,
       subject: d.kind === "estudio" ? ($("#fSubject").value.trim() || null) : null,
-      assignee: rotation || team ? null : admin ? (d.assignee || null) : (editing ? editing.assignee : meId),
+      assignee: rotation || team || crew ? null : admin ? (d.sel.length === 1 ? d.sel[0] : null) : (editing ? editing.assignee : meId),
       points: admin ? Math.max(0, Math.round(Number($("#fPts").value) || 0)) : (editing ? Number(editing.points) || 0 : 0),
       freq: d.freq || "none",
       due,
@@ -1439,6 +1510,13 @@ function openRewardForm(r){
   });
   $$("#rGive .chip").forEach((b) => b.addEventListener("click", () => {
     const m = member(b.dataset.m); if (!m) return;
+    const cost = Math.max(0, Math.round(Number($("#rCost").value) || 0));
+    const falta = cost - available(m.id);
+    if (falta > 0 && b.dataset.sure !== "1") {
+      b.dataset.sure = "1";
+      b.innerHTML = av(m, "sm") + esc(m.name) + " · le faltan " + falta + " ⭐. ¿Dárselo igual? Toca otra vez";
+      return;
+    }
     giveReward(Object.assign({}, editing, { cost:Math.max(0, Math.round(Number($("#rCost").value) || 0)) }), m.id);
     closeSheet(); celebrate("🎁 Para " + m.name);
   }));

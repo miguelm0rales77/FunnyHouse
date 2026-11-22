@@ -11,6 +11,11 @@ Web app instalable, hermana de Despensar. Cada miembro entra con su perfil y su 
   para **«cualquiera»** (la hace uno, el primero que pueda) o para **«todos»** (cada uno la
   suya: hacer la cama, lavarse los dientes…). En las de «todos» cada uno la marca por su
   cuenta, gana sus puntos, y en la lista se ve el progreso (p. ej. «Todos · 2/3»).
+- **Juntos**: en «Para quién» se pueden tocar varias personas. La tarea se marca una sola vez
+  y, al aprobarla, **cada uno** gana los puntos (p. ej. «Recoger el salón» entre dos).
+- **Premios**: los puntos son un libro de cuentas. Al aprobar un premio se apunta un gasto
+  (−coste) y el saldo baja. En Premios → «Cuenta de …» se ve lo ganado, lo canjeado y lo que
+  queda, y la lista de «Premios canjeados».
 - **Favoritos**: al crear o editar una tarea, un admin puede activar «Guardar como favorito».
   Sale arriba en «Nueva tarea»: un toque rellena título, tipo, repetición, puntos, revisión y
   notas (no la persona). Se gestionan en Familia → «Tareas favoritas». Necesita `security.sql`

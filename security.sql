@@ -20,6 +20,7 @@ create extension if not exists pgcrypto with schema extensions;
 
 -- Por si schema.sql es de una versión anterior: columna de las tareas de «todos».
 alter table fh_tasks add column if not exists team text;
+alter table fh_tasks add column if not exists crew text;   -- tareas «juntos»
 
 -- Tareas favoritas (plantillas). Igual que en schema.sql, por si no lo has vuelto a ejecutar.
 create table if not exists fh_favs (
@@ -235,7 +236,7 @@ declare
   vr fh_rewards; rw fh_rewards;
   vf fh_favs;
   ec fh_claims;  vc fh_claims;
-  ph text; v_expected text; v_mine boolean;
+  ph text; v_expected text; v_mine boolean; v_payee text; v_doneid text;
 begin
   a := fh__actor(p_token); h := a.home; adm := a.role = 'admin';
   if jsonb_typeof(p_ops) is distinct from 'array' or jsonb_array_length(p_ops) > 300 then
@@ -304,17 +305,18 @@ begin
         if vt.title is null or length(btrim(vt.title)) not between 1 and 120 then perform fh__deny(i, 'Título no válido'); end if;
         if not adm then
           if et.id is null then
-            vt.assignee := a.id; vt.points := 0; vt.needs_ok := true; vt.rotation := null; vt.rot_start := null; vt.team := null;
+            vt.assignee := a.id; vt.points := 0; vt.needs_ok := true; vt.rotation := null; vt.rot_start := null; vt.team := null; vt.crew := null;
             vt.created_by := a.id; vt.archived := false;
           elsif et.created_by = a.id then
             if exists (select 1 from fh_done where home = h and task_id = k and status = 'ok') then
               perform fh__deny(i, 'Ya tiene una vez aprobada: pide a un adulto que la cambie');
             end if;
             vt.assignee := et.assignee; vt.points := et.points; vt.needs_ok := et.needs_ok;
-            vt.rotation := et.rotation; vt.rot_start := et.rot_start; vt.team := et.team;
+            vt.rotation := et.rotation; vt.rot_start := et.rot_start; vt.team := et.team; vt.crew := et.crew;
             vt.created_by := et.created_by; vt.archived := et.archived;
           elsif et.assignee = a.id or a.id = any(string_to_array(coalesce(et.rotation, ''), ','))
-                or a.id = any(string_to_array(coalesce(et.team, ''), ',')) then
+                or a.id = any(string_to_array(coalesce(et.team, ''), ','))
+                or a.id = any(string_to_array(coalesce(et.crew, ''), ',')) then
             -- en una tarea de otro, solo puede apuntar la nota del examen
             update fh_tasks set grade = left(vt.grade, 20), updated_at = now() where id = k and home = h;
             continue;
@@ -326,10 +328,10 @@ begin
         insert into fh_tasks select (vt).*
           on conflict (id) do update set
             (title, kind, study_type, subject, assignee, points, freq, due, needs_ok, notes, grade,
-             created_by, archived, rotation, rot_start, team, updated_at)
+             created_by, archived, rotation, rot_start, team, crew, updated_at)
           = (excluded.title, excluded.kind, excluded.study_type, excluded.subject, excluded.assignee, excluded.points,
              excluded.freq, excluded.due, excluded.needs_ok, excluded.notes, excluded.grade,
-             excluded.created_by, excluded.archived, excluded.rotation, excluded.rot_start, excluded.team, excluded.updated_at)
+             excluded.created_by, excluded.archived, excluded.rotation, excluded.rot_start, excluded.team, excluded.crew, excluded.updated_at)
           where fh_tasks.home = h;
       end if;
 
@@ -354,6 +356,8 @@ begin
           if vd.member_id is distinct from a.id then perform fh__deny(i, 'Solo puedes marcar tus tareas'); end if;
           if coalesce(t.team, '') <> '' then
             v_mine := a.id = any(string_to_array(t.team, ','));
+          elsif coalesce(t.crew, '') <> '' then
+            v_mine := a.id = any(string_to_array(t.crew, ','));
           else
             v_mine := t.assignee is null or t.assignee = a.id or a.id = any(string_to_array(coalesce(t.rotation, ''), ','));
           end if;
@@ -383,13 +387,24 @@ begin
         vp := jsonb_populate_record(null::fh_points, r);
         if not adm then
           -- un miembro solo «cobra» una tarea sin revisión que él mismo acaba de completar
-          select * into ed from fh_done where id = substr(k, 3) and home = h;
+          -- (en una tarea «juntos», también los puntos de sus compañeros: d|hecha|persona)
+          v_payee := a.id; v_doneid := substr(k, 3);
+          select * into ed from fh_done where id = v_doneid and home = h;
+          if ed.id is null and left(k, 2) = 'd|' then
+            v_payee := split_part(k, '|', array_length(string_to_array(k, '|'), 1));
+            v_doneid := substr(k, 3, length(k) - 3 - length(v_payee));
+            select * into ed from fh_done where id = v_doneid and home = h;
+          end if;
           select * into t from fh_tasks where id = ed.task_id and home = h;
           if left(k, 2) <> 'd|' or ed.id is null or ed.status <> 'ok' or ed.member_id <> a.id
              or t.id is null or t.needs_ok then
             perform fh__deny(i, 'Los puntos los da un adulto');
           end if;
-          vp.member_id := a.id; vp.delta := ed.points; vp.given_by := a.id; vp.reason := t.title;
+          if v_payee <> a.id and not (v_payee = any(string_to_array(coalesce(t.crew, ''), ','))
+                                      and a.id = any(string_to_array(coalesce(t.crew, ''), ','))) then
+            perform fh__deny(i, 'Los puntos los da un adulto');
+          end if;
+          vp.member_id := v_payee; vp.delta := ed.points; vp.given_by := a.id; vp.reason := t.title;
         end if;
         if vp.delta is null or not exists (select 1 from fh_members where id = vp.member_id and home = h) then
           perform fh__deny(i, 'Puntos no válidos');

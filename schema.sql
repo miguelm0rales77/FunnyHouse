@@ -104,6 +104,10 @@ alter table fh_tasks add column if not exists rot_start date;
 -- (hacer la cama, lavarse los dientes…). Si está vacía, es una tarea normal.
 alter table fh_tasks add column if not exists team text;
 
+-- «Juntos»: lista de ids de miembros que hacen la tarea a la vez (una sola vez)
+-- y que se llevan los puntos cada uno.
+alter table fh_tasks add column if not exists crew text;
+
 -- Fotos de perfil (una por miembro, id = id del miembro). Van aparte para que
 -- la app solo las descargue cuando cambian. Son JPEG pequeños (192 px) en texto.
 create table if not exists fh_photos (
